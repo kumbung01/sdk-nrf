@@ -33,6 +33,7 @@ extern "C" {
  *  Roughly equal to the nRF24Lxx default parameters except for CRC,
  *  which is set to 16 bit, and protocol, which is set to DPL.
  */
+<<<<<<< Updated upstream
 #define ESB_DEFAULT_CONFIG                                                     \
 	{                                                                      \
 		.protocol = ESB_PROTOCOL_ESB_DPL,                              \
@@ -48,6 +49,32 @@ extern "C" {
 		.selective_auto_ack = false,                                   \
 		.use_fast_ramp_up = false                                      \
 	}
+=======
+
+#if CONFIG_ESB_CENTRAL
+#ifdef CONFIG_ZMK_SPLIT_BLE_CENTRAL_PERIPHERALS
+#define ESB_PIPE_COUNT CONFIG_ZMK_SPLIT_BLE_CENTRAL_PERIPHERALS
+#else
+#define ESB_PIPE_COUNT CONFIG_ESB_PIPE_COUNT
+#endif
+#else
+#define ESB_PIPE_COUNT 1
+#endif
+
+#define ESB_DEFAULT_CONFIG                                                                         \
+	{.protocol = ESB_PROTOCOL_ESB_DPL,                                                         \
+	 .mode = ESB_MODE_PTX,                                                                     \
+	 .event_handler = 0,                                                                       \
+	 .bitrate = ESB_BITRATE_2MBPS,                                                             \
+	 .crc = ESB_CRC_16BIT,                                                                     \
+	 .tx_output_power = 0,                                                                     \
+	 .retransmit_delay = 600,                                                                  \
+	 .retransmit_count = 3,                                                                    \
+	 .tx_mode = ESB_TXMODE_AUTO,                                                               \
+	 .payload_length = 32,                                                                     \
+	 .selective_auto_ack = false,                                                              \
+	 .use_fast_ramp_up = false}
+>>>>>>> Stashed changes
 
 /** @brief Default legacy radio parameters.
  *
@@ -278,10 +305,23 @@ enum esb_tx_mode {
 
 /** @brief Enhanced ShockBurst event IDs. */
 enum esb_evt_id {
-	ESB_EVENT_TX_SUCCESS, /**< Event triggered on TX success. */
-	ESB_EVENT_TX_FAILED,  /**< Event triggered on TX failure. */
-	ESB_EVENT_RX_RECEIVED /**< Event triggered on RX received. */
+	ESB_EVENT_TX_SUCCESS,  /**< Event triggered on TX success. */
+	ESB_EVENT_TX_FAILED,   /**< Event triggered on TX failure. */
+	ESB_EVENT_RX_RECEIVED, /**< Event triggered on RX received. */
+	ESB_EVENT_PERIPHERAL_SYNC
 };
+
+struct esb_header {
+	union {
+		struct __downstream {
+			uint8_t rssi;
+			uint32_t refslot;
+		} __packed downstream;
+		struct __upstream {
+			bool tx_power_changed;
+		} __packed upstream;
+	};
+} __packed;
 
 /** @brief Enhanced ShockBurst payload.
  *
@@ -290,6 +330,7 @@ enum esb_evt_id {
  */
 struct esb_payload {
 	uint8_t length; /**< Length of the packet when not in DPL mode. */
+<<<<<<< Updated upstream
 	uint8_t pipe;   /**< Pipe used for this payload. */
 	int8_t rssi;   /**< RSSI for the received packet. */
 	uint8_t noack;  /**< Flag indicating that this packet will not be
@@ -298,12 +339,46 @@ struct esb_payload {
 		       */
 	uint8_t pid;    /**< PID assigned during communication. */
 	uint8_t data[CONFIG_ESB_MAX_PAYLOAD_LENGTH]; /**< The payload data. */
+=======
+	uint8_t pipe;	/**< Pipe used for this payload. */
+	int8_t rssi;	/**< RSSI for the received packet. */
+	// uint8_t noack;	/**< Flag indicating that this packet will not be
+	// 		 *  acknowledged. Flag is ignored when selective auto
+	// 		 *  ack is enabled.
+	// 		 */
+	uint8_t pid; /**< PID assigned during communication. */
+	uint8_t data[CONFIG_ESB_MAX_PAYLOAD_LENGTH +
+		     sizeof(struct esb_header)]; /**< The payload data. */
+};
+
+struct tx_evt {
+	uint32_t tx_attempts; /**< Number of TX retransmission attempts. */
+};
+
+struct sync_evt {
+	uint8_t pipe;
+	bool up;
+>>>>>>> Stashed changes
 };
 
 /** @brief Enhanced ShockBurst event. */
 struct esb_evt {
+<<<<<<< Updated upstream
 	enum esb_evt_id evt_id;	/**< Enhanced ShockBurst event ID. */
 	uint32_t tx_attempts;	/**< Number of TX retransmission attempts. */
+=======
+	enum esb_evt_id evt_id; /**< Enhanced ShockBurst event ID. */
+	union {
+		struct tx_evt tx;
+		struct sync_evt sync;
+	};
+};
+
+struct esb_conn_cb {
+	void (*connected)(int pipe);
+	void (*disconnected)(int pipe);
+	sys_snode_t node;
+>>>>>>> Stashed changes
 };
 
 /** @brief Event handler prototype. */
@@ -311,9 +386,16 @@ typedef void (*esb_event_handler)(const struct esb_evt *event);
 
 /** @brief Main configuration structure for the module. */
 struct esb_config {
+<<<<<<< Updated upstream
 	enum esb_protocol protocol;		/**< Protocol. */
 	enum esb_mode mode;			/**< Mode. */
 	esb_event_handler event_handler;	/**< Event handler. */
+=======
+	uint8_t pipe;
+	enum esb_protocol protocol;	 /**< Protocol. */
+	enum esb_mode mode;		 /**< Mode. */
+	esb_event_handler event_handler; /**< Event handler. */
+>>>>>>> Stashed changes
 	/* General RF parameters */
 	enum esb_bitrate bitrate;		/**< Bitrate mode. */
 	enum esb_crc crc;			/**< CRC mode. */
@@ -340,6 +422,7 @@ struct esb_config {
 			       *  on the platforms that are used on each side).
 			       */
 	bool selective_auto_ack; /**< Selective auto acknowledgement.
+<<<<<<< Updated upstream
 				   *  When this feature is disabled, all packets
 				   *  will be acknowledged ignoring the noack
 				   *  field.
@@ -353,6 +436,29 @@ struct esb_config {
 				 *  between nRF52 and/or nRF53 Series devices, this delay can
 				 *  be reduced to 40 µs.
 				 */
+=======
+				  *  When this feature is disabled, all packets
+				  *  will be acknowledged ignoring the noack
+				  *  field.
+				  */
+	bool use_fast_ramp_up;	 /**<  When this feature is enabled, radio TXEN and
+				  *  RXEN delays are reduced from 130 µs to 40 µs.
+				  *  The radio peripheral needs some time to start up
+				  *  analog components of the radio. On the nRF51 and
+				  *  nRF24L Series devices, a hard-coded 130 µs delay is
+				  *  implemented. If ESB connection is achieved only
+				  *  between nRF52 and/or nRF53 Series devices, this delay can
+				  *  be reduced to 40 µs.
+				  */
+};
+
+enum polling_rate {
+	ESB_2KHZ,
+	ESB_1KHZ,
+	ESB_500HZ,
+	ESB_250HZ,
+	ESB_125HZ,
+>>>>>>> Stashed changes
 };
 
 /** @brief Initialize the Enhanced ShockBurst module.
@@ -606,6 +712,18 @@ int esb_set_bitrate(enum esb_bitrate bitrate);
  */
 int esb_reuse_pid(uint8_t pipe);
 
+<<<<<<< Updated upstream
+=======
+int esb_tdma_start(void);
+
+int esb_tdma_stop(void);
+
+int esb_write_tx_ringbuf(uint8_t pipe, uint8_t *data, uint32_t size);
+
+uint8_t esb_get_slot_state(void);
+
+int esb_conn_cb_register(struct esb_conn_cb *cb);
+>>>>>>> Stashed changes
 /** @} */
 
 #ifdef __cplusplus
