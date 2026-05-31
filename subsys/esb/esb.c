@@ -338,7 +338,7 @@ static void set_slotsize()
 
 	ctx.window_size = ctx.slotsize / 2;
 
-	LOG_WRN("slot %u window %u slots %u", ctx.slotsize, ctx.window_size, ctx.pipes);
+	// LOG_WRN("slot %u window %u slots %u", ctx.slotsize, ctx.window_size, ctx.pipes);
 }
 
 static void set_hb_loops(void)
@@ -346,7 +346,7 @@ static void set_hb_loops(void)
 	uint32_t loop_size = ctx.slotsize * ctx.pipes;
 	ctx.hb_loops = HEARTBEAT_INTERVAL / loop_size;
 
-	LOG_WRN("HEARTBEAT LOOPS(%u) SIZE(%u)", ctx.hb_loops, ctx.hb_loops * loop_size);
+	// LOG_WRN("HEARTBEAT LOOPS(%u) SIZE(%u)", ctx.hb_loops, ctx.hb_loops * loop_size);
 }
 
 static void set_control_packet(void *data)
@@ -375,7 +375,7 @@ static void apply_control_packet(void *data)
 	ctx.pipes = control->pipes;
 	ctx.addr_delay = control->addr_delay;
 
-	LOG_WRN("slot %u window %u slots %u", ctx.slotsize, ctx.window_size, ctx.pipes);
+	// LOG_WRN("slot %u window %u slots %u", ctx.slotsize, ctx.window_size, ctx.pipes);
 	set_hb_loops();
 }
 
@@ -565,7 +565,7 @@ static void set_addr_delay(void)
 								    : preamble_addr_pcf_bits;
 
 	ctx.addr_delay = ramp_up_delay + addr_airtime;
-	LOG_WRN("ADDR_DELAY(%u)", ctx.addr_delay);
+	// LOG_WRN("ADDR_DELAY(%u)", ctx.addr_delay);
 }
 
 #if CONFIG_ESB_CENTRAL
@@ -1979,7 +1979,7 @@ int esb_tdma_start(void)
 	if (esb_state != ESB_STATE_IDLE) {
 		return -EBUSY;
 	}
-	LOG_WRN("tdma start");
+	// LOG_WRN("tdma start");
 
 #if CONFIG_ESB_CENTRAL
 	NVIC_ClearPendingIRQ(ESB_TIMER_IRQ);
@@ -2008,7 +2008,7 @@ int esb_tdma_stop(void)
 
 	on_radio_disabled = NULL;
 
-	LOG_WRN("tdma stop");
+	// LOG_WRN("tdma stop");
 
 #if CONFIG_ESB_CENTRAL
 	irq_disable(ESB_TIMER_IRQ);
@@ -2203,7 +2203,7 @@ static void peripheral_start_desync(void)
 	nrf_timer_cc_set(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL1, timeout);
 
 	if ((esb_state != ESB_STATE_PERIPHERAL_DESYNC) && (esb_state != ESB_STATE_IDLE)) {
-		LOG_WRN("state: %d", esb_state);
+		// LOG_WRN("state: %d", esb_state);
 		set_sync_evt_interrupt(0, false);
 	}
 
@@ -2313,9 +2313,9 @@ static void peripheral_prepare_rx(void)
 		nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_RXEN);
 	}
 
-	LOG_WRN("now %u start %u slot %u ch %u drift %ld hb %d tx %d dsync %u", now, rx_start, slot,
-		esb_addr.rf_channel, drift, ctx.is_hb, tx_power_get(ctx.channel_idx),
-		ctx.desync_count);
+	// LOG_WRN("now %u start %u slot %u ch %u drift %ld hb %d tx %d dsync %u", now, rx_start,
+	// slot, 	esb_addr.rf_channel, drift, ctx.is_hb, tx_power_get(ctx.channel_idx),
+	// 	ctx.desync_count);
 }
 
 static void peripheral_disabled_rx(void)
@@ -2427,9 +2427,9 @@ static void peripheral_disabled_rx(void)
 		}
 	}
 
-	LOG_WRN("len [%u %d] tx[%d %d] rx[%d %d] t %d r %d s %d drift %lld rssi %d",
-		tx_pdu->pdu.length, rx_len, tx_sn, rx_nesn, tx_nesn, rx_sn, pipe_info->tx_try,
-		retransmit_payload, send_rx_event, drift, (int)(-rssi));
+	// LOG_WRN("len [%u %d] tx[%d %d] rx[%d %d] t %d r %d s %d drift %lld rssi %d",
+	// 	tx_pdu->pdu.length, rx_len, tx_sn, rx_nesn, tx_nesn, rx_sn, pipe_info->tx_try,
+	// 	retransmit_payload, send_rx_event, drift, (int)(-rssi));
 }
 
 static void peripheral_disabled_tx_ack(void)
