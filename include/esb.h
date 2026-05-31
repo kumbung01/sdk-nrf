@@ -33,41 +33,48 @@ extern "C" {
  *  Roughly equal to the nRF24Lxx default parameters except for CRC,
  *  which is set to 16 bit, and protocol, which is set to DPL.
  */
-#define ESB_DEFAULT_CONFIG                                                     \
-	{                                                                      \
-		.protocol = ESB_PROTOCOL_ESB_DPL,                              \
-		.mode = ESB_MODE_PTX,					       \
-		.event_handler = 0,					       \
-		.bitrate = ESB_BITRATE_2MBPS,				       \
-		.crc = ESB_CRC_16BIT,					       \
-		.tx_output_power = 0,			                       \
-		.retransmit_delay = 600,				       \
-		.retransmit_count = 3,					       \
-		.tx_mode = ESB_TXMODE_AUTO,				       \
-		.payload_length = 32,					       \
-		.selective_auto_ack = false,                                   \
-		.use_fast_ramp_up = false                                      \
-	}
+
+#if CONFIG_ESB_CENTRAL
+#ifdef CONFIG_ZMK_SPLIT_BLE_CENTRAL_PERIPHERALS
+#define ESB_PIPE_COUNT CONFIG_ZMK_SPLIT_BLE_CENTRAL_PERIPHERALS
+#else
+#define ESB_PIPE_COUNT CONFIG_ESB_PIPE_COUNT
+#endif
+#else
+#define ESB_PIPE_COUNT 1
+#endif
+
+#define ESB_DEFAULT_CONFIG                                                                         \
+	{.protocol = ESB_PROTOCOL_ESB_DPL,                                                         \
+	 .mode = ESB_MODE_PTX,                                                                     \
+	 .event_handler = 0,                                                                       \
+	 .bitrate = ESB_BITRATE_2MBPS,                                                             \
+	 .crc = ESB_CRC_16BIT,                                                                     \
+	 .tx_output_power = 0,                                                                     \
+	 .retransmit_delay = 600,                                                                  \
+	 .retransmit_count = 3,                                                                    \
+	 .tx_mode = ESB_TXMODE_AUTO,                                                               \
+	 .payload_length = 32,                                                                     \
+	 .selective_auto_ack = false,                                                              \
+	 .use_fast_ramp_up = false}
 
 /** @brief Default legacy radio parameters.
  *
  *  Identical to the nRF24Lxx defaults.
  */
-#define ESB_LEGACY_CONFIG                                                      \
-	{                                                                      \
-		.protocol = ESB_PROTOCOL_ESB,				       \
-		.mode = ESB_MODE_PTX,					       \
-		.event_handler = 0,					       \
-		.bitrate = ESB_BITRATE_2MBPS,				       \
-		.crc = ESB_CRC_8BIT,					       \
-		.tx_output_power = 0,			                       \
-		.retransmit_delay = 600,				       \
-		.retransmit_count = 3,					       \
-		.tx_mode = ESB_TXMODE_AUTO,				       \
-		.payload_length = 32,					       \
-		.selective_auto_ack = false,                                   \
-		.use_fast_ramp_up = false                                      \
-	}
+#define ESB_LEGACY_CONFIG                                                                          \
+	{.protocol = ESB_PROTOCOL_ESB,                                                             \
+	 .mode = ESB_MODE_PTX,                                                                     \
+	 .event_handler = 0,                                                                       \
+	 .bitrate = ESB_BITRATE_2MBPS,                                                             \
+	 .crc = ESB_CRC_8BIT,                                                                      \
+	 .tx_output_power = 0,                                                                     \
+	 .retransmit_delay = 600,                                                                  \
+	 .retransmit_count = 3,                                                                    \
+	 .tx_mode = ESB_TXMODE_AUTO,                                                               \
+	 .payload_length = 32,                                                                     \
+	 .selective_auto_ack = false,                                                              \
+	 .use_fast_ramp_up = false}
 
 /** @brief Macro to create an initializer for a TX data packet.
  *
@@ -81,25 +88,23 @@ extern "C" {
  *  @return  Initializer that sets up the pipe, length, and byte array for
  *           content of the TX data.
  */
-#define ESB_CREATE_PAYLOAD(_pipe, ...)                                         \
-	{                                                                      \
-		.pipe = _pipe,                                                 \
-		.length = NUM_VA_ARGS_LESS_1(_pipe, __VA_ARGS__),	       \
-		.data = {						       \
-			__VA_ARGS__                                            \
-		}                                                              \
+#define ESB_CREATE_PAYLOAD(_pipe, ...)                                                             \
+	{                                                                                          \
+		.pipe = _pipe, .length = NUM_VA_ARGS_LESS_1(_pipe, __VA_ARGS__), .data = {         \
+			__VA_ARGS__                                                                \
+		}                                                                                  \
 	}
 
 /** @brief Enhanced ShockBurst protocols. */
 enum esb_protocol {
-	ESB_PROTOCOL_ESB,	/**< Fixed payload length. */
-	ESB_PROTOCOL_ESB_DPL	/**< Dynamic payload length. */
+	ESB_PROTOCOL_ESB,    /**< Fixed payload length. */
+	ESB_PROTOCOL_ESB_DPL /**< Dynamic payload length. */
 };
 
 /** @brief Enhanced ShockBurst modes. */
 enum esb_mode {
-	ESB_MODE_PTX,	/**< Primary transmitter mode. */
-	ESB_MODE_PRX	/**< Primary receiver mode.    */
+	ESB_MODE_PTX, /**< Primary transmitter mode. */
+	ESB_MODE_PRX  /**< Primary receiver mode.    */
 };
 
 /** @brief Enhanced ShockBurst bitrate modes. */
@@ -278,10 +283,23 @@ enum esb_tx_mode {
 
 /** @brief Enhanced ShockBurst event IDs. */
 enum esb_evt_id {
-	ESB_EVENT_TX_SUCCESS, /**< Event triggered on TX success. */
-	ESB_EVENT_TX_FAILED,  /**< Event triggered on TX failure. */
-	ESB_EVENT_RX_RECEIVED /**< Event triggered on RX received. */
+	ESB_EVENT_TX_SUCCESS,  /**< Event triggered on TX success. */
+	ESB_EVENT_TX_FAILED,   /**< Event triggered on TX failure. */
+	ESB_EVENT_RX_RECEIVED, /**< Event triggered on RX received. */
+	ESB_EVENT_PERIPHERAL_SYNC
 };
+
+struct esb_header {
+	union {
+		struct __downstream {
+			uint8_t rssi;
+			uint32_t refslot;
+		} __packed downstream;
+		struct __upstream {
+			bool tx_power_changed;
+		} __packed upstream;
+	};
+} __packed;
 
 /** @brief Enhanced ShockBurst payload.
  *
@@ -290,20 +308,39 @@ enum esb_evt_id {
  */
 struct esb_payload {
 	uint8_t length; /**< Length of the packet when not in DPL mode. */
-	uint8_t pipe;   /**< Pipe used for this payload. */
-	int8_t rssi;   /**< RSSI for the received packet. */
-	uint8_t noack;  /**< Flag indicating that this packet will not be
-		       *  acknowledged. Flag is ignored when selective auto
-		       *  ack is enabled.
-		       */
-	uint8_t pid;    /**< PID assigned during communication. */
-	uint8_t data[CONFIG_ESB_MAX_PAYLOAD_LENGTH]; /**< The payload data. */
+	uint8_t pipe;	/**< Pipe used for this payload. */
+	int8_t rssi;	/**< RSSI for the received packet. */
+	// uint8_t noack;	/**< Flag indicating that this packet will not be
+	// 		 *  acknowledged. Flag is ignored when selective auto
+	// 		 *  ack is enabled.
+	// 		 */
+	uint8_t pid; /**< PID assigned during communication. */
+	uint8_t data[CONFIG_ESB_MAX_PAYLOAD_LENGTH +
+		     sizeof(struct esb_header)]; /**< The payload data. */
+};
+
+struct tx_evt {
+	uint32_t tx_attempts; /**< Number of TX retransmission attempts. */
+};
+
+struct sync_evt {
+	uint8_t pipe;
+	bool up;
 };
 
 /** @brief Enhanced ShockBurst event. */
 struct esb_evt {
-	enum esb_evt_id evt_id;	/**< Enhanced ShockBurst event ID. */
-	uint32_t tx_attempts;	/**< Number of TX retransmission attempts. */
+	enum esb_evt_id evt_id; /**< Enhanced ShockBurst event ID. */
+	union {
+		struct tx_evt tx;
+		struct sync_evt sync;
+	};
+};
+
+struct esb_conn_cb {
+	void (*connected)(int pipe);
+	void (*disconnected)(int pipe);
+	sys_snode_t node;
 };
 
 /** @brief Event handler prototype. */
@@ -311,48 +348,57 @@ typedef void (*esb_event_handler)(const struct esb_evt *event);
 
 /** @brief Main configuration structure for the module. */
 struct esb_config {
-	enum esb_protocol protocol;		/**< Protocol. */
-	enum esb_mode mode;			/**< Mode. */
-	esb_event_handler event_handler;	/**< Event handler. */
+	uint8_t pipe;
+	enum esb_protocol protocol;	 /**< Protocol. */
+	enum esb_mode mode;		 /**< Mode. */
+	esb_event_handler event_handler; /**< Event handler. */
 	/* General RF parameters */
-	enum esb_bitrate bitrate;		/**< Bitrate mode. */
-	enum esb_crc crc;			/**< CRC mode. */
-	int8_t tx_output_power;			/**< Radio TX power.
-						  *  Output power in dBm.
-						  */
+	enum esb_bitrate bitrate; /**< Bitrate mode. */
+	enum esb_crc crc;	  /**< CRC mode. */
+	int8_t tx_output_power;	  /**< Radio TX power.
+				   *  Output power in dBm.
+				   */
 
 	uint16_t retransmit_delay; /**< The delay between each retransmission of
-				  *  unacknowledged packets.
-				  *  If the CONFIG_ESB_NEVER_DISABLE_TX Kconfig option is enabled,
-				  *  this is the delay between two consecutive transmissions.
-				  *  Depending on the reception processing time, a minimal
-				  *  value might be required (for example, a typical value
-				  *  for 32-bit payload is 20 µs).
-				  */
+				    *  unacknowledged packets.
+				    *  If the CONFIG_ESB_NEVER_DISABLE_TX Kconfig option is enabled,
+				    *  this is the delay between two consecutive transmissions.
+				    *  Depending on the reception processing time, a minimal
+				    *  value might be required (for example, a typical value
+				    *  for 32-bit payload is 20 µs).
+				    */
 	uint16_t retransmit_count; /**< The number of retransmission attempts
-				  *  before transmission fail.
-				  */
+				    *  before transmission fail.
+				    */
 
 	/* Control settings */
-	enum esb_tx_mode tx_mode;	/**< Transmission mode. */
+	enum esb_tx_mode tx_mode; /**< Transmission mode. */
 
-	uint8_t payload_length; /**< Length of the payload (maximum length depends
-			       *  on the platforms that are used on each side).
-			       */
+	uint8_t payload_length;	 /**< Length of the payload (maximum length depends
+				  *  on the platforms that are used on each side).
+				  */
 	bool selective_auto_ack; /**< Selective auto acknowledgement.
-				   *  When this feature is disabled, all packets
-				   *  will be acknowledged ignoring the noack
-				   *  field.
-				   */
-	bool use_fast_ramp_up; /**<  When this feature is enabled, radio TXEN and
-				 *  RXEN delays are reduced from 130 µs to 40 µs.
-				 *  The radio peripheral needs some time to start up
-				 *  analog components of the radio. On the nRF51 and
-				 *  nRF24L Series devices, a hard-coded 130 µs delay is
-				 *  implemented. If ESB connection is achieved only
-				 *  between nRF52 and/or nRF53 Series devices, this delay can
-				 *  be reduced to 40 µs.
-				 */
+				  *  When this feature is disabled, all packets
+				  *  will be acknowledged ignoring the noack
+				  *  field.
+				  */
+	bool use_fast_ramp_up;	 /**<  When this feature is enabled, radio TXEN and
+				  *  RXEN delays are reduced from 130 µs to 40 µs.
+				  *  The radio peripheral needs some time to start up
+				  *  analog components of the radio. On the nRF51 and
+				  *  nRF24L Series devices, a hard-coded 130 µs delay is
+				  *  implemented. If ESB connection is achieved only
+				  *  between nRF52 and/or nRF53 Series devices, this delay can
+				  *  be reduced to 40 µs.
+				  */
+};
+
+enum polling_rate {
+	ESB_2KHZ,
+	ESB_1KHZ,
+	ESB_500HZ,
+	ESB_250HZ,
+	ESB_125HZ,
 };
 
 /** @brief Initialize the Enhanced ShockBurst module.
@@ -606,6 +652,15 @@ int esb_set_bitrate(enum esb_bitrate bitrate);
  */
 int esb_reuse_pid(uint8_t pipe);
 
+int esb_tdma_start(void);
+
+int esb_tdma_stop(void);
+
+int esb_write_tx_ringbuf(uint8_t pipe, uint8_t *data, uint32_t size);
+
+uint8_t esb_get_slot_state(void);
+
+int esb_conn_cb_register(struct esb_conn_cb *cb);
 /** @} */
 
 #ifdef __cplusplus

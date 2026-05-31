@@ -11,10 +11,16 @@ menuconfig ESB
 	select MPSL
 	select MPSL_FEM_ONLY if !ESB_DYNAMIC_INTERRUPTS
 	default n
+	select ENTROPY_GENERATOR
+	select ENTROPY_NRF5_RNG
 	help
 	  Enable ESB functionality.
 
 if ESB
+
+config ESB_CENTRAL
+	bool "esb tdma central config"
+	default n
 
 config ESB_MAX_PAYLOAD_LENGTH
 	int "Maximum payload size"
@@ -56,6 +62,43 @@ config ESB_EVENT_IRQ_PRIORITY
 	range 0 5 if ZERO_LATENCY_IRQS
 	range 0 6
 	default 2
+
+config ESB_TX_RINGBUF
+	bool "send tx event through ring buffer"
+	default y
+
+config ESB_TX_RINGBUF_SIZE
+	int "set tx ringbuf size"
+	default 256
+
+choice ESB_POLLING_RATE_SEL
+    prompt "Polling rate"
+    default ESB_POLLING_RATE_1KHZ
+
+config ESB_POLLING_RATE_2KHZ
+    bool "2000 Hz"
+
+config ESB_POLLING_RATE_1KHZ
+    bool "1000 Hz"
+
+config ESB_POLLING_RATE_500HZ
+    bool "500 Hz"
+
+config ESB_POLLING_RATE_250HZ
+    bool "250 Hz"
+
+config ESB_POLLING_RATE_125HZ
+    bool "125 Hz"
+
+endchoice
+
+config ESB_POLLING_RATE
+    int
+    default 2000 if ESB_POLLING_RATE_2KHZ
+    default 1000 if ESB_POLLING_RATE_1KHZ
+    default 500  if ESB_POLLING_RATE_500HZ
+    default 250  if ESB_POLLING_RATE_250HZ
+    default 125  if ESB_POLLING_RATE_125HZ
 
 menu "Hardware selection (alter with care)"
 
