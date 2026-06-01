@@ -293,10 +293,9 @@ struct esb_header {
 	union {
 		struct __downstream {
 			uint8_t rssi;
-			uint32_t refslot;
 		} __packed downstream;
 		struct __upstream {
-			bool tx_power_changed;
+			uint8_t dummy[4];
 		} __packed upstream;
 	};
 } __packed;

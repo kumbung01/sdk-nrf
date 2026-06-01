@@ -243,6 +243,7 @@ static struct esb_tdma_context {
 	uint32_t start;	       // current radio start timer value
 	uint32_t timeout;      // current timeout timer value
 	uint32_t desync_count; // number of times that peripheral has desynced
+	uint32_t slotdiff;
 	uint8_t pipe;	       // current pipe(fixed for periheral)
 	uint8_t timeout_count; // desync count
 	uint8_t addr_delay;    // calcualted addr delay
@@ -253,9 +254,10 @@ static struct esb_tdma_context {
 } ctx;
 
 struct esb_ctrl_packet {
-	uint8_t pipes;
+	uint32_t refslot;
 	uint32_t slotsize;
 	uint8_t addr_delay;
+	uint8_t pipes;
 } __packed;
 
 struct esb_packet {
@@ -360,6 +362,7 @@ static void set_control_packet(void *data)
 	control->slotsize = ctx.slotsize;
 	control->addr_delay = ctx.addr_delay;
 	control->pipes = ctx.pipes;
+	control->refslot = ctx.refslot;
 }
 
 static void apply_control_packet(void *data)
@@ -374,6 +377,7 @@ static void apply_control_packet(void *data)
 	ctx.window_size = ctx.slotsize / 2;
 	ctx.pipes = control->pipes;
 	ctx.addr_delay = control->addr_delay;
+	ctx.refslot = control->refslot;
 
 	// LOG_WRN("slot %u window %u slots %u", ctx.slotsize, ctx.window_size, ctx.pipes);
 	set_hb_loops();
@@ -2073,7 +2077,6 @@ static void central_prepare_tx(void)
 
 	esb_addr.rf_channel = get_channel(next_slot);
 	tx_packet->header.downstream.rssi = rssi_get(pipe, ctx.channel_idx);
-	tx_packet->header.downstream.refslot = next_slot;
 
 	on_timer_compare1 = central_timeslot_end;
 
@@ -2242,7 +2245,6 @@ static void peripheral_disabled_desync(void)
 	apply_control_packet(data->data);
 
 	ctx.last_hb = nrf_timer_cc_get(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL2) - ctx.addr_delay;
-	ctx.refslot = data->header.downstream.refslot;
 
 	set_sync_evt_interrupt(esb_cfg.pipe, true);
 
@@ -2289,8 +2291,8 @@ static void peripheral_prepare_rx(void)
 	uint32_t rx_timeout = rx_start + ctx.window_size;
 	ctx.timeout = rx_timeout;
 
-	uint32_t slot_diff = loops_diff * ctx.pipes;
-	uint32_t slot = ctx.refslot + slot_diff;
+	ctx.slotdiff = loops_diff * ctx.pipes;
+	uint32_t slot = ctx.refslot + ctx.slotdiff;
 	esb_addr.rf_channel = get_channel(slot);
 	nrf_radio_frequency_set(NRF_RADIO, (RADIO_BASE_FREQUENCY + esb_addr.rf_channel));
 
@@ -2412,7 +2414,7 @@ static void peripheral_disabled_rx(void)
 		}
 
 		ctx.last_hb = sync;
-		ctx.refslot = rx_payload->header.downstream.refslot;
+		ctx.refslot += ctx.slotdiff;
 	}
 
 	// push RX
