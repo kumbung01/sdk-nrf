@@ -2229,8 +2229,8 @@ static void peripheral_start_desync(void)
 	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_CRCOK);
 
 	pto_ppi_for_peripheral_start_rx_desync_set();
-	LOG_WRN("start rx desync CHAN(%u), DESYNC(%u) PIPE(%u)", esb_addr.rf_channel,
-		ctx.desync_count, ctx.pipe);
+	// LOG_WRN("start rx desync CHAN(%u), DESYNC(%u) PIPE(%u)", esb_addr.rf_channel,
+	// 	ctx.desync_count, ctx.pipe);
 }
 
 static void peripheral_disabled_desync(void)
@@ -2260,8 +2260,8 @@ static void peripheral_disabled_desync(void)
 
 	set_sync_evt_interrupt(esb_cfg.pipe, true);
 
-	LOG_WRN("disabled rx desync: REF(%u) SYNC(%u) SN[%d %d] CTRL %d", ctx.refslot, ctx.last_hb,
-		rx_sn, rx_nesn, ctrl);
+	// LOG_WRN("disabled rx desync: REF(%u) SYNC(%u) SN[%d %d] CTRL %d", ctx.refslot,
+	// ctx.last_hb, 	rx_sn, rx_nesn, ctrl);
 
 	peripheral_prepare_rx();
 }
@@ -2323,9 +2323,9 @@ static void peripheral_prepare_rx(void)
 		nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_RXEN);
 	}
 
-	LOG_WRN("now %u start %u slot %u ch %u drift %ld hb %d tx %d dsync %u", now, rx_start, slot,
-		esb_addr.rf_channel, drift, ctx.is_hb, tx_power_get(ctx.channel_idx),
-		ctx.desync_count);
+	// LOG_WRN("now %u start %u slot %u ch %u drift %ld hb %d tx %d dsync %u", now, rx_start,
+	// slot, 	esb_addr.rf_channel, drift, ctx.is_hb, tx_power_get(ctx.channel_idx),
+	// 	ctx.desync_count);
 }
 
 static void peripheral_disabled_rx(void)
@@ -2443,9 +2443,9 @@ static void peripheral_disabled_rx(void)
 		}
 	}
 
-	LOG_WRN("len [%u %d] tx[%d %d] rx[%d %d] t %d r %d s %d drift %lld rssi %d",
-		tx_pdu->pdu.length, rx_len, tx_sn, rx_nesn, tx_nesn, rx_sn, pipe_info->tx_try,
-		retransmit_payload, send_rx_event, drift, (int)(-rssi));
+	// LOG_WRN("len [%u %d] tx[%d %d] rx[%d %d] t %d r %d s %d drift %lld rssi %d",
+	// 	tx_pdu->pdu.length, rx_len, tx_sn, rx_nesn, tx_nesn, rx_sn, pipe_info->tx_try,
+	// 	retransmit_payload, send_rx_event, drift, (int)(-rssi));
 }
 
 static void peripheral_disabled_tx_ack(void)
