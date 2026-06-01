@@ -2139,10 +2139,10 @@ static void central_timeslot_end(void)
 		return;
 	}
 
-	bool rx_sn = rx_pdu->pdu.sn;
-	bool tx_nesn = pipe_info->nesn;
-	bool rx_nesn = rx_pdu->pdu.nesn;
-	bool tx_sn = pipe_info->sn;
+	uint8_t rx_sn = rx_pdu->pdu.sn;
+	uint8_t tx_nesn = pipe_info->nesn;
+	uint8_t rx_nesn = rx_pdu->pdu.nesn;
+	uint8_t tx_sn = pipe_info->sn;
 	uint8_t tx_try = pipe_info->tx_try;
 
 	if (tx_try > 0 && rx_nesn != tx_sn) {
@@ -2342,14 +2342,18 @@ static void peripheral_disabled_rx(void)
 
 	esb_state = ESB_STATE_PERIPHERAL_TX_ACK;
 
+	// trigger tx first before packet is set
+	nrf_radio_packetptr_set(NRF_RADIO, tx_pdu);
+	nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_TXEN);
+
 	// pto_ppi_for_peripheral_prepare_rx_clear();
 	struct pipe_info *pipe_info = rx_pipe_info_get(0);
 
 	// update TX
-	bool rx_sn = rx_pdu->pdu.sn;
-	bool tx_nesn = pipe_info->nesn;
-	bool rx_nesn = rx_pdu->pdu.nesn;
-	bool tx_sn = pipe_info->sn;
+	uint8_t rx_sn = rx_pdu->pdu.sn;
+	uint8_t tx_nesn = pipe_info->nesn;
+	uint8_t rx_nesn = rx_pdu->pdu.nesn;
+	uint8_t tx_sn = pipe_info->sn;
 	uint8_t tx_try = pipe_info->tx_try;
 
 	bool tx_failed = (tx_try > 0) && (tx_sn == rx_nesn);
@@ -2390,14 +2394,12 @@ static void peripheral_disabled_rx(void)
 	tx_pdu->pdu.nesn = pipe_info->nesn;
 
 	esb_fem_for_tx_ack();
-	nrf_radio_packetptr_set(NRF_RADIO, tx_pdu);
+
 	uint8_t rssi = rx_payload->header.downstream.rssi;
 	bool tp_changed = tx_power_update(ctx.channel_idx, rssi);
 	// tx_payload->header.upstream.tx_power_changed = tp_changed;
 	esb_cfg.tx_output_power = tx_power_get(ctx.channel_idx);
 	update_radio_tx_power();
-
-	nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_TXEN);
 
 	// set sync
 	ctx.timeout_count = 0;
