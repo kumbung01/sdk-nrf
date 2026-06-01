@@ -270,7 +270,7 @@ K_MSGQ_DEFINE(sync_event_msgq, sizeof(struct esb_evt), ESB_PIPE_COUNT * 2, 4);
 
 #define DRIFT_LIMIT	 (50)
 #define DESYNC_COUNT_MAX (16)
-#define RADIO_MARGIN	 (30)
+#define RADIO_MARGIN	 (20)
 #define TIMEOUT_MARGIN	 (60)
 
 #define HEARTBEAT_INTERVAL 1000000
@@ -1407,16 +1407,11 @@ static bool update_radio_parameters(void)
  *  @retval true   Operation successful.
  *  @retval false  Operation failed.
  */
-static bool rx_fifo_push_rfbuf(uint8_t pipe, uint8_t pid)
+static bool push_rx_fifo(uint8_t pipe, uint8_t pid, uint8_t rx_len, uint8_t *rx_data)
 {
-	struct esb_radio_pdu *rx_pdu = (struct esb_radio_pdu *)rx_payload_buffer;
-	struct esb_packet *packet = (struct esb_packet *)rx_pdu->data;
-
 	if (rx_fifo.count >= CONFIG_ESB_RX_FIFO_SIZE) {
 		return false;
 	}
-
-	uint32_t rx_len = rx_pdu->pdu.length - sizeof(struct esb_header);
 
 	if (rx_len > CONFIG_ESB_MAX_PAYLOAD_LENGTH) {
 		return false;
@@ -1424,7 +1419,7 @@ static bool rx_fifo_push_rfbuf(uint8_t pipe, uint8_t pid)
 
 	rx_fifo.payload[rx_fifo.back]->length = rx_len;
 
-	memcpy(rx_fifo.payload[rx_fifo.back]->data, packet->data, rx_len);
+	memcpy(rx_fifo.payload[rx_fifo.back]->data, rx_data, rx_len);
 
 	rx_fifo.payload[rx_fifo.back]->pipe = pipe;
 	rx_fifo.payload[rx_fifo.back]->rssi = rssi_get(pipe, ctx.channel_idx);
@@ -2147,6 +2142,7 @@ static void central_timeslot_end(void)
 	uint8_t rx_nesn = rx_pdu->pdu.nesn;
 	uint8_t tx_sn = pipe_info->sn;
 	uint8_t tx_try = pipe_info->tx_try;
+	bool ctrl = rx_pdu->pdu.ctrl;
 
 	if (tx_try > 0 && rx_nesn != tx_sn) {
 		pop_tx(pipe);
@@ -2164,13 +2160,13 @@ static void central_timeslot_end(void)
 	uint8_t rx_len = rx_pdu->pdu.length;
 	uint8_t rssi = nrf_radio_rssi_sample_get(NRF_RADIO);
 	bool retransmit_payload = (pipe_info->crc == crc) && (tx_nesn != rx_sn);
+	bool send_rx_event = !retransmit_payload && !ctrl;
 
 	rssi_update(pipe, rssi, channel_idx);
-
-	if (rx_len > sizeof(struct esb_header)) {
-		if (retransmit_payload) {
+	if (send_rx_event) {
+		if (ctrl) {
 			//
-		} else if (rx_fifo_push_rfbuf(pipe, rx_nesn)) {
+		} else if (push_rx_fifo(pipe, rx_sn, rx_len, rx_pdu->data)) {
 			pipe_info->crc = crc;
 			pipe_info->nesn = (!pipe_info->nesn);
 			set_rx_evt_interrupt();
@@ -2361,8 +2357,8 @@ static void peripheral_disabled_rx(void)
 	bool tx_failed = (tx_try > 0) && (tx_sn == rx_nesn);
 	bool retransmit_payload = (tx_nesn != rx_sn);
 
-	int rx_len = rx_pdu->pdu.length;
-	bool send_rx_event = !retransmit_payload && rx_len > sizeof(struct esb_header);
+	int rx_len = rx_pdu->pdu.length - sizeof(struct esb_header);
+	bool send_rx_event = !retransmit_payload && rx_len > 0;
 
 	// we toggle nesn here before pushing rxbuf
 	if (send_rx_event && rx_fifo.count < CONFIG_ESB_RX_FIFO_SIZE) {
@@ -2385,11 +2381,16 @@ static void peripheral_disabled_rx(void)
 			pop_tx(0);
 		}
 
-		uint8_t tx_len = copy_tx(0, tx_payload->data) + sizeof(struct esb_header);
+		uint8_t tx_len = copy_tx(0, tx_pdu->data);
+		if (tx_len == 0) {
+			tx_len = sizeof(struct esb_header);
+			tx_pdu->pdu.ctrl = true;
+		} else {
+			tx_pdu->pdu.ctrl = false;
+		}
 		update_rf_payload_format(tx_len);
 		tx_pdu->pdu.length = tx_len;
-
-		pipe_info->tx_try = tx_len > sizeof(struct esb_header);
+		pipe_info->tx_try = tx_pdu->pdu.ctrl ? 0 : 1;
 	}
 
 	tx_pdu->pdu.sn = pipe_info->sn;
@@ -2420,8 +2421,8 @@ static void peripheral_disabled_rx(void)
 	// push RX
 	if (send_rx_event) {
 		if (rx_pdu->pdu.ctrl == true) {
-			// noop
-		} else if (rx_fifo_push_rfbuf(0, rx_sn)) {
+			//
+		} else if (push_rx_fifo(0, rx_sn, rx_len, rx_payload->data)) {
 			set_rx_evt_interrupt();
 		}
 	}
