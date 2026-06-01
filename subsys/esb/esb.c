@@ -260,6 +260,24 @@ struct esb_ctrl_packet {
 	uint8_t pipes;
 } __packed;
 
+struct esb_header_dn {
+	uint8_t rssi;
+} __packed;
+
+struct esb_header_up {
+	uint8_t dummy[4];
+} __packed;
+
+struct esb_packet_dn {
+	struct esb_header_dn header;
+	uint8_t data[];
+} __packed;
+
+struct esb_packet_up {
+	struct esb_header_up header;
+	uint8_t data[];
+} __packed;
+
 struct esb_packet {
 	struct esb_header header;
 	uint8_t data[];
@@ -609,10 +627,8 @@ void pto_context_reset(void)
 	ctx.channel_idx = 0;
 }
 
-static uint8_t rx_payload_buffer[CONFIG_ESB_MAX_PAYLOAD_LENGTH + sizeof(struct esb_header) +
-				 sizeof(struct esb_radio_pdu)];
-static uint8_t tx_payload_buffer[CONFIG_ESB_MAX_PAYLOAD_LENGTH + sizeof(struct esb_header) +
-				 sizeof(struct esb_radio_pdu)];
+static uint8_t rx_payload_buffer[CONFIG_ESB_MAX_PAYLOAD_LENGTH + sizeof(struct esb_radio_pdu)];
+static uint8_t tx_payload_buffer[CONFIG_ESB_MAX_PAYLOAD_LENGTH + sizeof(struct esb_radio_pdu)];
 
 #if CONFIG_ESB_CENTRAL
 
@@ -2048,10 +2064,10 @@ static void central_prepare_tx(void)
 	uint8_t pipe = ctx.pipe;
 	struct pipe_info *pipe_info = rx_pipe_info_get(pipe);
 	struct esb_radio_pdu *pdu = (struct esb_radio_pdu *)rx_payload_buffer;
-	struct esb_packet *tx_packet = (struct esb_packet *)pdu->data;
+	struct esb_packet_dn *tx_packet = (struct esb_packet_dn *)pdu->data;
 
 	bool slot_synced = is_slot_synced(pipe);
-	uint8_t packet_length = sizeof(struct esb_header);
+	uint8_t packet_length = sizeof(struct esb_header_dn);
 
 	// if slot is out of sync, then send refslot
 	if (!slot_synced) {
@@ -2062,7 +2078,7 @@ static void central_prepare_tx(void)
 	// if next packet can be transmitted, then read txbuf
 	else {
 		packet_length += copy_tx(pipe, tx_packet->data);
-		pipe_info->tx_try = packet_length > sizeof(struct esb_header);
+		pipe_info->tx_try = packet_length > sizeof(struct esb_header_dn) ? 1 : 0;
 		pdu->pdu.ctrl = false;
 	}
 
@@ -2071,7 +2087,7 @@ static void central_prepare_tx(void)
 	pdu->pdu.nesn = pipe_info->nesn;
 
 	esb_addr.rf_channel = get_channel(next_slot);
-	tx_packet->header.downstream.rssi = rssi_get(pipe, ctx.channel_idx);
+	tx_packet->header.rssi = rssi_get(pipe, ctx.channel_idx);
 
 	on_timer_compare1 = central_timeslot_end;
 
@@ -2220,7 +2236,7 @@ static void peripheral_start_desync(void)
 static void peripheral_disabled_desync(void)
 {
 	struct esb_radio_pdu *pdu = (struct esb_radio_pdu *)rx_payload_buffer;
-	struct esb_packet *data = (struct esb_packet *)pdu->data;
+	struct esb_packet_dn *packet = (struct esb_packet_dn *)pdu->data;
 	struct pipe_info *pipe_info = rx_pipe_info_get(0);
 	pto_ppi_for_peripheral_start_rx_desync_clear();
 	bool ctrl = pdu->pdu.ctrl;
@@ -2238,7 +2254,7 @@ static void peripheral_disabled_desync(void)
 	pipe_info->tx_try = 0;
 	ctx.desync_count = 0;
 
-	apply_control_packet(data->data);
+	apply_control_packet(packet->data);
 
 	ctx.last_hb = nrf_timer_cc_get(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL2) - ctx.addr_delay;
 
@@ -2315,9 +2331,9 @@ static void peripheral_prepare_rx(void)
 static void peripheral_disabled_rx(void)
 {
 	struct esb_radio_pdu *rx_pdu = (struct esb_radio_pdu *)rx_payload_buffer;
-	struct esb_packet *rx_payload = (struct esb_packet *)rx_pdu->data;
+	struct esb_packet_dn *rx_packet = (struct esb_packet_dn *)rx_pdu->data;
 	struct esb_radio_pdu *tx_pdu = (struct esb_radio_pdu *)tx_payload_buffer;
-	struct esb_packet *tx_payload = (struct esb_packet *)tx_pdu->data;
+	struct esb_packet_up *tx_packet = (struct esb_packet_up *)tx_pdu->data;
 	uint32_t flags = 0;
 
 	// check timeout or crc error
@@ -2357,8 +2373,8 @@ static void peripheral_disabled_rx(void)
 	bool tx_failed = (tx_try > 0) && (tx_sn == rx_nesn);
 	bool retransmit_payload = (tx_nesn != rx_sn);
 
-	int rx_len = rx_pdu->pdu.length - sizeof(struct esb_header);
-	bool send_rx_event = !retransmit_payload && rx_len > 0;
+	int rx_len = rx_pdu->pdu.length;
+	bool send_rx_event = !retransmit_payload && rx_len > sizeof(struct esb_header_dn);
 
 	// we toggle nesn here before pushing rxbuf
 	if (send_rx_event && rx_fifo.count < CONFIG_ESB_RX_FIFO_SIZE) {
@@ -2383,7 +2399,7 @@ static void peripheral_disabled_rx(void)
 
 		uint8_t tx_len = copy_tx(0, tx_pdu->data);
 		if (tx_len == 0) {
-			tx_len = sizeof(struct esb_header);
+			tx_len = sizeof(struct esb_header_up);
 			tx_pdu->pdu.ctrl = true;
 		} else {
 			tx_pdu->pdu.ctrl = false;
@@ -2398,9 +2414,8 @@ static void peripheral_disabled_rx(void)
 
 	esb_fem_for_tx_ack();
 
-	uint8_t rssi = rx_payload->header.downstream.rssi;
+	uint8_t rssi = rx_packet->header.rssi;
 	bool tp_changed = tx_power_update(ctx.channel_idx, rssi);
-	// tx_payload->header.upstream.tx_power_changed = tp_changed;
 	esb_cfg.tx_output_power = tx_power_get(ctx.channel_idx);
 	update_radio_tx_power();
 
@@ -2422,7 +2437,8 @@ static void peripheral_disabled_rx(void)
 	if (send_rx_event) {
 		if (rx_pdu->pdu.ctrl == true) {
 			//
-		} else if (push_rx_fifo(0, rx_sn, rx_len, rx_payload->data)) {
+		} else if (push_rx_fifo(0, rx_sn, rx_len - sizeof(struct esb_header_dn),
+					rx_packet->data)) {
 			set_rx_evt_interrupt();
 		}
 	}
