@@ -289,7 +289,7 @@ K_MSGQ_DEFINE(sync_event_msgq, sizeof(struct esb_evt), ESB_PIPE_COUNT * 2, 4);
 #define DRIFT_LIMIT	 (50)
 #define DESYNC_COUNT_MAX (16)
 #define RADIO_MARGIN	 (20)
-#define TIMEOUT_MARGIN	 (60)
+#define TIMEOUT_MARGIN	 (90)
 
 #define HEARTBEAT_INTERVAL 1000000
 
