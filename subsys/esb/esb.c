@@ -485,24 +485,20 @@ static int16_t tx_power_get(uint8_t pipe)
 
 static bool tx_power_update(uint8_t pipe, uint8_t rssi)
 {
+	if (++packet_got[resolve_pipe(pipe)] < 5) {
+		return false;
+	}
+
+	packet_got[resolve_pipe(pipe)] = 0;
+
 	int rssi_diff = (int)rssi - RSSI_BASELINE;
 
 	if (abs(rssi_diff) < 2) {
-		tx_power_changed[resolve_pipe(pipe)] = false;
-		packet_got[resolve_pipe(pipe)] = 0;
-
 		return false;
 	}
 
-	if (tx_power_changed[resolve_pipe(pipe)] && (++packet_got[resolve_pipe(pipe)] < 5)) {
-		return false;
-	}
-
-	int new_power = TX_POWER[resolve_pipe(pipe)] + (rssi_diff / 2);
+	int new_power = TX_POWER[resolve_pipe(pipe)] + TX_POWER_STEP * (rssi_diff > 0 ? 1 : -1);
 	TX_POWER[resolve_pipe(pipe)] = CLAMP(new_power, TX_POWER_MIN, TX_POWER_MAX);
-
-	packet_got[resolve_pipe(pipe)] = 0;
-	tx_power_changed[resolve_pipe(pipe)] = true;
 
 	LOG_WRN("RSSI %u DIFF %d TX_POWER: %d", rssi, rssi_diff, tx_power_get(resolve_pipe(pipe)));
 
@@ -2144,10 +2140,10 @@ static void central_prepare_tx(void)
 
 	esb_state = ESB_STATE_CENTRAL_TX;
 
-	if (nrf_timer_event_check(esb_timer.p_reg, NRF_TIMER_EVENT_COMPARE0) &&
-	    (!nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_TXREADY))) {
-		nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_TXEN);
-	}
+	// if (nrf_timer_event_check(esb_timer.p_reg, NRF_TIMER_EVENT_COMPARE0) &&
+	//     (!nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_TXREADY))) {
+	// 	nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_TXEN);
+	// }
 
 	// LOG_WRN("PIPE %u NOW %u TX %u TO %u SL %u CH %u LEN %u", pipe, now,
 	// tx_start, timeout, 	next_slot, esb_addr.rf_channel, packet_length);
@@ -2216,12 +2212,13 @@ static void central_timeslot_end(void)
 	uint8_t rx_len = rx_pdu->pdu.length;
 	uint8_t rssi = nrf_radio_rssi_sample_get(NRF_RADIO);
 	bool retransmit_payload = (pipe_info->crc == crc) && (tx_nesn != rx_sn);
-	bool send_rx_event = !retransmit_payload && !ctrl;
+	bool send_rx_event = !retransmit_payload;
 
 	rssi_update(pipe, rssi);
 	if (send_rx_event) {
 		if (ctrl) {
-			//
+			pipe_info->crc = crc;
+			pipe_info->nesn = (!pipe_info->nesn);
 		} else if (push_rx_fifo(pipe, rx_sn, rx_len, rx_pdu->data)) {
 			pipe_info->crc = crc;
 			pipe_info->nesn = (!pipe_info->nesn);
@@ -2358,10 +2355,10 @@ static void peripheral_prepare_rx(void)
 
 	on_radio_disabled = peripheral_disabled_rx;
 
-	if (nrf_timer_event_check(esb_timer.p_reg, NRF_TIMER_EVENT_COMPARE0) &&
-	    !nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_RXREADY)) {
-		nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_RXEN);
-	}
+	// if (nrf_timer_event_check(esb_timer.p_reg, NRF_TIMER_EVENT_COMPARE0) &&
+	//     !nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_RXREADY)) {
+	// 	nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_RXEN);
+	// }
 
 	// LOG_WRN("now %u start %u slot %u ch %u drift %ld hb %d tx %d dsync %u", now, rx_start,
 	// slot, 	esb_addr.rf_channel, drift, ctx.is_hb, tx_power_get(ctx.channel_idx),
@@ -2406,7 +2403,8 @@ static void peripheral_disabled_rx(void)
 	uint8_t tx_sn = pipe_info->sn;
 	uint8_t tx_try = pipe_info->tx_try;
 
-	bool tx_failed = (tx_try > 0) && (tx_sn == rx_nesn);
+	// bool tx_failed = (tx_try > 0) && (tx_sn == rx_nesn);
+	bool tx_failed = (tx_sn == rx_nesn);
 	bool retransmit_payload = (tx_nesn != rx_sn);
 
 	int rx_len = rx_pdu->pdu.length;
@@ -2428,7 +2426,6 @@ static void peripheral_disabled_rx(void)
 	} else {
 		// if packet before was payload, then tx was successful.
 		if (tx_try > 0) {
-			pipe_info->sn = (!pipe_info->sn);
 			set_tx_evt_interrupt(0, true);
 			pop_tx(0);
 		}
@@ -2440,6 +2437,8 @@ static void peripheral_disabled_rx(void)
 		} else {
 			tx_pdu->pdu.ctrl = false;
 		}
+
+		pipe_info->sn = (!pipe_info->sn);
 		update_rf_payload_format(tx_len);
 		tx_pdu->pdu.length = tx_len;
 		pipe_info->tx_try = tx_pdu->pdu.ctrl ? 0 : 1;
@@ -2458,7 +2457,6 @@ static void peripheral_disabled_rx(void)
 		}
 	}
 
-	// trigger tx first before packet is set
 	nrf_radio_packetptr_set(NRF_RADIO, tx_pdu);
 	nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_TXEN);
 
