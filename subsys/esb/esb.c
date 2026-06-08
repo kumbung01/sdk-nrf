@@ -500,7 +500,8 @@ static bool tx_power_update(uint8_t pipe, uint8_t rssi)
 	int new_power = TX_POWER[resolve_pipe(pipe)] + TX_POWER_STEP * (rssi_diff > 0 ? 1 : -1);
 	TX_POWER[resolve_pipe(pipe)] = CLAMP(new_power, TX_POWER_MIN, TX_POWER_MAX);
 
-	LOG_WRN("RSSI %u DIFF %d TX_POWER: %d", rssi, rssi_diff, tx_power_get(resolve_pipe(pipe)));
+	// LOG_WRN("RSSI %u DIFF %d TX_POWER: %d", rssi, rssi_diff,
+	// tx_power_get(resolve_pipe(pipe)));
 
 	return true;
 }
@@ -2229,9 +2230,9 @@ static void central_timeslot_end(void)
 	// prepare for next slot
 	central_prepare_tx();
 
-	LOG_WRN("pipe %u rx_len %u rssi -%u crc %lx tx[%d %d] rx[%d %d] r %d s %d", pipe, rx_len,
-		rssi, crc, tx_sn, rx_nesn, tx_nesn, rx_sn, retransmit_payload,
-		(retransmit_payload && rx_len > 0));
+	// LOG_WRN("pipe %u rx_len %u rssi -%u crc %lx tx[%d %d] rx[%d %d] r %d s %d", pipe, rx_len,
+	// 	rssi, crc, tx_sn, rx_nesn, tx_nesn, rx_sn, retransmit_payload,
+	// 	(retransmit_payload && rx_len > 0));
 }
 
 static void set_rx_packetptr(void)
@@ -2379,7 +2380,7 @@ static void peripheral_disabled_rx(void)
 
 	bool is_timeout = (ctx.timeout - crcok) > ctx.slotsize;
 	if (is_timeout) {
-		LOG_WRN("timeout");
+		// LOG_WRN("timeout");
 		if (++ctx.timeout_count > DESYNC_COUNT_MAX) {
 			// something's wrong, disable radio and goto desync state
 			pto_ppi_for_peripheral_prepare_rx_clear();
