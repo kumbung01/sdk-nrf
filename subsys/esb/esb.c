@@ -1956,6 +1956,37 @@ int esb_write_payload(const struct esb_payload *payload)
 	return 0;
 }
 
+int esb_tx_start(uint8_t pipe, uint32_t size)
+{
+	if (!tx_ok(pipe, size)) {
+		return -ENOMEM;
+	}
+
+	tx_start(pipe);
+
+	return 0;
+}
+
+int esb_tx_put(uint8_t *data, uint32_t size)
+{
+	tx_put(data, size);
+
+	return 0;
+}
+
+int esb_tx_finish(void)
+{
+	tx_finish();
+
+#if !CONFIG_ESB_CENTRAL
+	if (esb_state == ESB_STATE_PERIPHERAL_RX_READY) {
+		peripheral_prepare_rx();
+	}
+#endif
+
+	return 0;
+}
+
 int esb_read_rx_payload(struct esb_payload *payload)
 {
 	if (!esb_initialized) {

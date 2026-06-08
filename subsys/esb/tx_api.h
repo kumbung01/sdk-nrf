@@ -20,3 +20,10 @@ int pop_tx(uint8_t pipe);
 void reset_tx(uint8_t pipe);
 void reset_tx_all(void);
 void init_tx(void);
+
+#if CONFIG_ESB_TX_RINGBUF
+// api for tx ringbuf
+void tx_start(uint8_t pipe);
+void tx_put(uint8_t *data, uint32_t size);
+void tx_finish(void);
+#endif
