@@ -4,6 +4,7 @@
 static struct tx_buffer {
 	struct ring_buf data;
 	uint32_t peeked;
+	uint32_t key;
 } txbuf[ESB_PIPE_COUNT];
 
 int count_tx(uint8_t pipe)
@@ -75,4 +76,27 @@ void reset_tx_all(void)
 		ring_buf_reset(&buf->data);
 		buf->peeked = 0;
 	}
+}
+
+static uint32_t key;
+static struct tx_buffer *buf;
+void tx_start(uint8_t pipe)
+{
+	key = irq_lock();
+	buf = &txbuf[resolve_pipe(pipe)];
+}
+
+void tx_put(uint8_t *data, uint32_t size)
+{
+	if (buf == NULL) {
+		return;
+	}
+
+	ring_buf_put(buf, data, size);
+}
+
+void tx_finish(void)
+{
+	buf = NULL;
+	irq_unlock(key);
 }

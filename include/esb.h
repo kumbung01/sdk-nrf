@@ -655,7 +655,11 @@ int esb_tdma_start(void);
 
 int esb_tdma_stop(void);
 
-int esb_write_tx_ringbuf(uint8_t pipe, uint8_t *data, uint32_t size);
+int esb_tx_start(uint8_t pipe, uint32_t size);
+
+int esb_tx_put(uint8_t *data, uint32_t size);
+
+int esb_tx_finish(void);
 
 uint8_t esb_get_slot_state(void);
 
