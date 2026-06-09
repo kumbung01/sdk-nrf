@@ -614,7 +614,7 @@ static void central_setup(void)
 
 	ctx.refslot = sys_rand32_get();
 	// LOG_WRN("SEED: %u", ctx.refslot);
-	k_work_reschedule(&monitoring_work, K_SECONDS(1));
+	// k_work_reschedule(&monitoring_work, K_SECONDS(1));
 }
 
 #else
@@ -645,7 +645,7 @@ static void peripheral_setup(void)
 	nrf_radio_txaddress_set(NRF_RADIO, ctx.pipe);
 	nrf_radio_rxaddresses_set(NRF_RADIO, BIT(ctx.pipe));
 
-	k_work_reschedule(&monitoring_work, K_SECONDS(1));
+	// k_work_reschedule(&monitoring_work, K_SECONDS(1));
 }
 #endif
 
