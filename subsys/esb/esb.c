@@ -485,11 +485,6 @@ static int16_t tx_power_get(uint8_t pipe)
 
 static bool tx_power_update(uint8_t pipe, uint8_t rssi)
 {
-	if (++packet_got[resolve_pipe(pipe)] < 5) {
-		return false;
-	}
-
-	packet_got[resolve_pipe(pipe)] = 0;
 
 	int rssi_diff = (int)rssi - RSSI_BASELINE;
 
@@ -497,8 +492,7 @@ static bool tx_power_update(uint8_t pipe, uint8_t rssi)
 		return false;
 	}
 
-	int new_power = TX_POWER[resolve_pipe(pipe)] + TX_POWER_STEP * (rssi_diff > 0 ? 1 : -1);
-	TX_POWER[resolve_pipe(pipe)] = CLAMP(new_power, TX_POWER_MIN, TX_POWER_MAX);
+	TX_POWER[resolve_pipe(pipe)] = CLAMP(rssi_diff + TX_POWER_BASE, TX_POWER_MIN, TX_POWER_MAX);
 
 	// LOG_WRN("RSSI %u DIFF %d TX_POWER: %d", rssi, rssi_diff,
 	// tx_power_get(resolve_pipe(pipe)));
@@ -595,6 +589,21 @@ static void set_addr_delay(void)
 }
 
 #if CONFIG_ESB_CENTRAL
+
+void monitoring_work_cb(struct k_work *work)
+{
+	printk("pipe  rssi\n");
+	printk("----  ----\n");
+	for (int pipe = 0; pipe < ESB_PIPE_COUNT; ++pipe) {
+		int rssi = -rssi_get(pipe);
+		printk("%4u  %+4d dBm\n", pipe, rssi);
+	}
+
+	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+	k_work_reschedule(dwork, K_SECONDS(1));
+}
+K_WORK_DELAYABLE_DEFINE(monitoring_work, monitoring_work_cb);
+
 static void central_setup(void)
 {
 	nrf_radio_shorts_set(NRF_RADIO, RADIO_SHORTS_COMMON);
@@ -607,9 +616,24 @@ static void central_setup(void)
 
 	ctx.refslot = sys_rand32_get();
 	// LOG_WRN("SEED: %u", ctx.refslot);
+	// k_work_reschedule(&monitoring_work, K_SECONDS(1));
 }
 
 #else
+
+void monitoring_work_cb(struct k_work *work)
+{
+	int tx_power = (int8_t)nrf_radio_txpower_get(NRF_RADIO);
+
+	printk("tx_power\n");
+	printk("--------\n");
+	printk("%+4d dBm\n", tx_power);
+
+	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+	// k_work_reschedule(dwork, K_SECONDS(1));
+}
+K_WORK_DELAYABLE_DEFINE(monitoring_work, monitoring_work_cb);
+
 static void peripheral_setup(void)
 {
 	nrf_radio_shorts_set(NRF_RADIO, RADIO_SHORTS_COMMON);
@@ -621,6 +645,8 @@ static void peripheral_setup(void)
 
 	nrf_radio_txaddress_set(NRF_RADIO, ctx.pipe);
 	nrf_radio_rxaddresses_set(NRF_RADIO, BIT(ctx.pipe));
+
+	k_work_reschedule(&monitoring_work, K_SECONDS(1));
 }
 #endif
 
@@ -2031,7 +2057,7 @@ int esb_tdma_start(void)
 	if (esb_state != ESB_STATE_IDLE) {
 		return -EBUSY;
 	}
-	// LOG_WRN("tdma start");
+	LOG_WRN("tdma started");
 
 #if CONFIG_ESB_CENTRAL
 	NVIC_ClearPendingIRQ(ESB_TIMER_IRQ);
@@ -2050,17 +2076,17 @@ int esb_tdma_start(void)
 	return 0;
 }
 
-int esb_tdma_stop(void)
+int esb_tdma_stop(bool force)
 {
 #if !CONFIG_ESB_CENTRAL
-	if (esb_state != ESB_STATE_PERIPHERAL_DESYNC) {
+	if (esb_state != ESB_STATE_PERIPHERAL_DESYNC && !force) {
 		return -EINVAL;
 	}
 #endif
 
 	on_radio_disabled = NULL;
 
-	// LOG_WRN("tdma stop");
+	LOG_WRN("tdma stopped");
 	nrfx_timer_disable(&esb_timer);
 
 #if CONFIG_ESB_CENTRAL

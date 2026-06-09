@@ -653,7 +653,7 @@ int esb_reuse_pid(uint8_t pipe);
 
 int esb_tdma_start(void);
 
-int esb_tdma_stop(void);
+int esb_tdma_stop(bool force);
 
 int esb_tx_start(uint8_t pipe, uint32_t size);
 
