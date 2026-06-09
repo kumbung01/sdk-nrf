@@ -460,22 +460,16 @@ static uint8_t rssi_get(uint8_t pipe)
 	return nrf_radio_rssi_sample_get(NRF_RADIO);
 }
 static int32_t TX_POWER[ESB_PIPE_COUNT];
-static bool tx_power_changed[ESB_PIPE_COUNT];
-static uint32_t packet_got[ESB_PIPE_COUNT];
 
 static void tx_power_reset(uint8_t pipe)
 {
 	TX_POWER[resolve_pipe(pipe)] = TX_POWER_BASE;
-	tx_power_changed[resolve_pipe(pipe)] = false;
-	packet_got[resolve_pipe(pipe)] = 0;
 }
 
 static void tx_power_raise(uint8_t pipe)
 {
 	int new_power = TX_POWER[resolve_pipe(pipe)] + TX_POWER_STEP;
 	TX_POWER[resolve_pipe(pipe)] = MIN(new_power, TX_POWER_MAX);
-	tx_power_changed[resolve_pipe(pipe)] = true;
-	packet_got[resolve_pipe(pipe)] = 0;
 }
 
 static int16_t tx_power_get(uint8_t pipe)
