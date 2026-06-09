@@ -299,12 +299,12 @@ K_MSGQ_DEFINE(sync_event_msgq, sizeof(struct esb_evt), ESB_PIPE_COUNT * 2, 4);
 
 #define DESYNC_AIRTIME_DEFAULT (150000)
 #define SCALE		       (1024)
-#define ALPHA		       (10)
+#define ALPHA		       (40)
 #define RSSI_BASELINE	       (68)
-#define TX_POWER_MAX	       (5)
+#define TX_POWER_MAX	       (2)
 #define TX_POWER_MIN	       (-16)
 #define TX_POWER_BASE	       (-4)
-#define TX_POWER_STEP	       (2)
+#define TX_POWER_STEP	       (1)
 #define TPMAX_SCALED	       (TX_POWER_MAX * SCALE)
 #define TPMIN_SCALED	       (TX_POWER_MIN * SCALE)
 #define TPSTEP_SCALED	       (TX_POWER_STEP * SCALE)
@@ -482,11 +482,15 @@ static bool tx_power_update(uint8_t pipe, uint8_t rssi)
 
 	int rssi_diff = (int)rssi - RSSI_BASELINE;
 
-	if (abs(rssi_diff) < 2) {
+	if (abs(rssi_diff) < 3) {
 		return false;
 	}
 
-	TX_POWER[resolve_pipe(pipe)] = CLAMP(rssi_diff + TX_POWER_BASE, TX_POWER_MIN, TX_POWER_MAX);
+	int new_power = TX_POWER[resolve_pipe(pipe)] + TX_POWER_STEP * (rssi_diff > 0 ? 1 : -1);
+	TX_POWER[resolve_pipe(pipe)] = CLAMP(new_power, TX_POWER_MIN, TX_POWER_MAX);
+
+	// TX_POWER[resolve_pipe(pipe)] = CLAMP(rssi_diff + TX_POWER_BASE, TX_POWER_MIN,
+	// TX_POWER_MAX);
 
 	// LOG_WRN("RSSI %u DIFF %d TX_POWER: %d", rssi, rssi_diff,
 	// tx_power_get(resolve_pipe(pipe)));
@@ -610,21 +614,22 @@ static void central_setup(void)
 
 	ctx.refslot = sys_rand32_get();
 	// LOG_WRN("SEED: %u", ctx.refslot);
-	// k_work_reschedule(&monitoring_work, K_SECONDS(1));
+	k_work_reschedule(&monitoring_work, K_SECONDS(1));
 }
 
 #else
 
 void monitoring_work_cb(struct k_work *work)
 {
+	int tx_power_cfg = tx_power_get(ctx.pipe);
 	int tx_power = (int8_t)nrf_radio_txpower_get(NRF_RADIO);
 
-	printk("tx_power\n");
+	printk("pw (cfg reg)\n");
 	printk("--------\n");
-	printk("%+4d dBm\n", tx_power);
+	printk("%+4d %+4d dBm\n", tx_power_cfg, tx_power);
 
 	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
-	// k_work_reschedule(dwork, K_SECONDS(1));
+	k_work_reschedule(dwork, K_SECONDS(1));
 }
 K_WORK_DELAYABLE_DEFINE(monitoring_work, monitoring_work_cb);
 
@@ -2469,15 +2474,8 @@ static void peripheral_disabled_rx(void)
 	tx_pdu->pdu.nesn = pipe_info->nesn;
 
 	esb_fem_for_tx_ack();
-
-	if (!tx_failed) {
-		uint8_t rssi = rx_packet->header.rssi;
-		if (tx_power_update(ctx.pipe, rssi)) {
-			esb_cfg.tx_output_power = tx_power_get(ctx.pipe);
-			update_radio_tx_power();
-		}
-	}
-
+	esb_cfg.tx_output_power = tx_power_get(ctx.pipe);
+	update_radio_tx_power();
 	nrf_radio_packetptr_set(NRF_RADIO, tx_pdu);
 	nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_TXEN);
 
@@ -2493,6 +2491,9 @@ static void peripheral_disabled_rx(void)
 
 		ctx.last_hb = sync;
 		ctx.refslot += ctx.slotdiff;
+
+		uint8_t rssi = rx_packet->header.rssi;
+		tx_power_update(ctx.pipe, rssi);
 	}
 
 	// push RX
