@@ -27,7 +27,7 @@ int pop_tx(uint8_t pipe)
 	struct tx_buffer *buf = &txbuf[resolve_pipe(pipe)];
 
 	uint32_t popped = ring_buf_get(&buf->data, data, buf->peeked);
-	buf->peeked -= popped;
+	buf->peeked = 0;
 	return popped;
 }
 

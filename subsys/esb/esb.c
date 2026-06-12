@@ -2315,8 +2315,8 @@ static void peripheral_disabled_desync(void)
 
 	bool rx_sn = pdu->pdu.sn;
 	bool rx_nesn = pdu->pdu.nesn;
-	pipe_info->sn = rx_nesn;
-	pipe_info->nesn = rx_sn;
+	pipe_info->sn = !rx_nesn;
+	pipe_info->nesn = !rx_sn;
 	pipe_info->tx_try = 0;
 	ctx.desync_count = 0;
 
@@ -2444,55 +2444,52 @@ static void peripheral_disabled_rx(void)
 		pipe_info->nesn = (!pipe_info->nesn);
 	}
 
+	uint8_t tx_len = tx_pdu->pdu.length;
 	if (tx_failed) {
 		if (++pipe_info->tx_try > DESYNC_COUNT_MAX) {
 			set_tx_evt_interrupt(0, false);
-			// pto_ppi_for_peripheral_prepare_rx_clear();
-			// peripheral_start_desync();
+			pto_ppi_for_peripheral_prepare_rx_clear();
+			peripheral_start_desync();
 			return;
 		}
 
-		// if (pipe_info->tx_try & 3) {
-		// 	tx_power_raise(ctx.channel_idx);
-		// }
 	} else {
 		// if packet before was payload, then tx was successful.
 		if (tx_try > 0) {
 			set_tx_evt_interrupt(0, true);
-			pop_tx(0);
+			uint32_t popped = pop_tx(0);
 		}
 
-		uint8_t tx_len = copy_tx(0, tx_pdu->data);
-		// if (tx_len == 0) {
-		// 	tx_len = sizeof(struct esb_header_up);
-		// 	tx_pdu->pdu.ctrl = true;
-		// } else {
-		// 	tx_pdu->pdu.ctrl = false;
-		// }
-
-		tx_pdu->pdu.ctrl = tx_len == 0;
-		pipe_info->sn = (!pipe_info->sn);
-		update_rf_payload_format(tx_len);
-		tx_pdu->pdu.length = tx_len;
-		// pipe_info->tx_try = tx_pdu->pdu.ctrl ? 0 : 1;
+		tx_len = copy_tx(0, tx_pdu->data);
 		pipe_info->tx_try = tx_len > 0;
 	}
 
-	tx_pdu->pdu.sn = pipe_info->sn;
-	tx_pdu->pdu.nesn = pipe_info->nesn;
-
-	esb_fem_for_tx_ack();
-	// if (ctx.is_hb) {
-	// 	uint8_t rssi = rx_packet->header.rssi;
-	// 	tx_power_update(ctx.pipe, rssi);
-	// 	esb_cfg.tx_output_power = tx_power_get(ctx.pipe);
-	// }
 	uint8_t rssi = nrf_radio_rssi_sample_get(NRF_RADIO);
 	rssi_update(0, rssi);
 
-	update_radio_tx_power();
-	nrf_radio_packetptr_set(NRF_RADIO, tx_pdu);
-	nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_TXEN);
+	bool tx_triggered = tx_len > 0 || ctx.is_hb;
+	if (tx_triggered) {
+		if (!tx_failed) {
+			pipe_info->sn = !pipe_info->sn;
+		}
+
+		tx_pdu->pdu.ctrl = tx_len == 0;
+		tx_pdu->pdu.length = tx_len;
+		tx_pdu->pdu.sn = pipe_info->sn;
+		tx_pdu->pdu.nesn = pipe_info->nesn;
+		update_rf_payload_format(tx_pdu->pdu.length);
+		nrf_radio_packetptr_set(NRF_RADIO, tx_pdu);
+
+		esb_fem_for_tx_ack();
+		if (ctx.is_hb) {
+			int8_t tx_power = rx_packet->header.tx_power;
+			tx_power_update(ctx.pipe, tx_power);
+			esb_cfg.tx_output_power = tx_power_get(ctx.pipe);
+			update_radio_tx_power();
+		}
+
+		nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_TXEN);
+	}
 
 	// set sync
 	ctx.timeout_count = 0;
@@ -2506,10 +2503,6 @@ static void peripheral_disabled_rx(void)
 
 		ctx.last_hb = sync;
 		ctx.refslot += ctx.slotdiff;
-
-		int8_t tx_power = rx_packet->header.tx_power;
-		tx_power_update(ctx.pipe, tx_power);
-		esb_cfg.tx_output_power = tx_power_get(ctx.pipe);
 	}
 
 	// push RX
@@ -2522,9 +2515,13 @@ static void peripheral_disabled_rx(void)
 		}
 	}
 
-	// LOG_WRN("len [%u %d] tx[%d %d] rx[%d %d] t %d r %d s %d drift %lld rssi %d",
-	// 	tx_pdu->pdu.length, rx_len, tx_sn, rx_nesn, tx_nesn, rx_sn, pipe_info->tx_try,
-	// 	retransmit_payload, send_rx_event, drift, (int)(-rssi));
+	if (!tx_triggered) {
+		peripheral_disabled_tx_ack();
+	}
+
+	// LOG_WRN("len [%u %d] tx[%d %d] rx[%d %d] t %d r %d s %d drift %lld rssi %d TR %d",
+	// tx_len, 	rx_len, tx_sn, rx_nesn, tx_nesn, rx_sn, pipe_info->tx_try,
+	// retransmit_payload, 	send_rx_event, drift, (int)(-rssi), tx_triggered);
 }
 
 static void peripheral_disabled_tx_ack(void)
