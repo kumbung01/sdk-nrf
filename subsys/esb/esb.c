@@ -303,7 +303,7 @@ K_MSGQ_DEFINE(sync_event_msgq, sizeof(struct esb_evt), ESB_PIPE_COUNT * 2, 4);
 #define ALPHA		       (40)
 #define RSSI_BASELINE	       (55)
 #define TX_POWER_MAX	       (5)
-#define TX_POWER_MIN	       (-12)
+#define TX_POWER_MIN	       (-16)
 #define TX_POWER_BASE	       (0)
 #define TX_POWER_STEP	       (4)
 #define TX_POWER_STEP_DN       (-2)
@@ -532,8 +532,10 @@ static bool tx_power_update(uint8_t pipe, int8_t tx_power)
 		return false;
 	}
 
-	int new_power =
-		TX_POWER[resolve_pipe(pipe)] + rssi_diff > 0 ? TX_POWER_STEP : TX_POWER_STEP_DN;
+	int new_power = rssi_diff;
+
+	// int new_power =
+	// 	TX_POWER[resolve_pipe(pipe)] + rssi_diff > 0 ? TX_POWER_STEP : TX_POWER_STEP_DN;
 
 	TX_POWER[resolve_pipe(pipe)] = CLAMP(new_power, TX_POWER_MIN, TX_POWER_MAX);
 
@@ -2458,8 +2460,7 @@ static void peripheral_disabled_rx(void)
 			peripheral_start_desync();
 			return;
 		}
-
-		tx_power_raise(0);
+		// tx_power_raise(0);
 	} else {
 		// if packet before was payload, then tx was successful.
 		if (tx_try > 0) {
