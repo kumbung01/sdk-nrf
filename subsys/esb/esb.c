@@ -527,7 +527,7 @@ static int16_t tx_power_get(uint8_t pipe)
 
 static bool tx_power_update(uint8_t pipe, int8_t tx_power)
 {
-	int rssi_diff = rssi_get(pipe) - RSSI_BASELINE - tx_power;
+	int rssi_diff = rssi_get(pipe) - RSSI_BASELINE + tx_power;
 	if (abs(rssi_diff) < 3) {
 		return false;
 	}
