@@ -261,7 +261,8 @@ struct esb_ctrl_packet {
 } __packed;
 
 struct esb_header_dn {
-	int8_t tx_power;
+	uint8_t rssi;
+	// uint8_t dummy[3];
 } __packed;
 
 struct esb_header_up {
@@ -288,8 +289,8 @@ K_MSGQ_DEFINE(sync_event_msgq, sizeof(struct esb_evt), ESB_PIPE_COUNT * 2, 4);
 
 #define DRIFT_LIMIT	 (50)
 #define DESYNC_COUNT_MAX (16)
-#define RADIO_MARGIN	 (30)
-#define TIMEOUT_MARGIN	 (90)
+#define RADIO_MARGIN	 (20)
+#define TIMEOUT_MARGIN	 (100)
 
 #define HEARTBEAT_INTERVAL    1000000
 #define HEARTBEAT_INTERVAL_MS (HEARTBEAT_INTERVAL / 1000)
@@ -300,12 +301,12 @@ K_MSGQ_DEFINE(sync_event_msgq, sizeof(struct esb_evt), ESB_PIPE_COUNT * 2, 4);
 
 #define DESYNC_AIRTIME_DEFAULT (150000)
 #define SCALE		       (1024)
-#define ALPHA		       (40)
-#define RSSI_BASELINE	       (55)
-#define TX_POWER_MAX	       (5)
-#define TX_POWER_MIN	       (-16)
-#define TX_POWER_BASE	       (0)
-#define TX_POWER_STEP	       (4)
+#define ALPHA		       (120)
+#define RSSI_BASELINE	       (62)
+#define TX_POWER_MAX	       (4)
+#define TX_POWER_MIN	       (-20)
+#define TX_POWER_BASE	       (-4)
+#define TX_POWER_STEP	       (8)
 #define TX_POWER_STEP_DN       (-2)
 #define TPMAX_SCALED	       (TX_POWER_MAX * SCALE)
 #define TPMIN_SCALED	       (TX_POWER_MIN * SCALE)
@@ -508,6 +509,7 @@ static uint8_t rssi_get(uint8_t pipe)
 }
 
 static int32_t TX_POWER[ESB_PIPE_COUNT];
+static uint8_t settle_count[ESB_PIPE_COUNT];
 
 static void tx_power_reset(uint8_t pipe)
 {
@@ -518,6 +520,7 @@ static void tx_power_raise(uint8_t pipe)
 {
 	int new_power = TX_POWER[resolve_pipe(pipe)] + TX_POWER_STEP;
 	TX_POWER[resolve_pipe(pipe)] = MIN(new_power, TX_POWER_MAX);
+	settle_count[resolve_pipe(pipe)] = 0;
 }
 
 static int16_t tx_power_get(uint8_t pipe)
@@ -525,17 +528,20 @@ static int16_t tx_power_get(uint8_t pipe)
 	return TX_POWER[resolve_pipe(pipe)];
 }
 
-static bool tx_power_update(uint8_t pipe, int8_t tx_power)
+static bool tx_power_update(uint8_t pipe, uint8_t rssi)
 {
-	int rssi_diff = rssi_get(pipe) - RSSI_BASELINE + tx_power;
-	if (abs(rssi_diff) < 3) {
+	int rssi_diff = rssi - RSSI_BASELINE;
+	if (abs(rssi_diff) < 4) {
 		return false;
 	}
 
-	int new_power = rssi_diff;
+	if (++settle_count[resolve_pipe(pipe)] < 16) {
+		return false;
+	}
 
-	// int new_power =
-	// 	TX_POWER[resolve_pipe(pipe)] + rssi_diff > 0 ? TX_POWER_STEP : TX_POWER_STEP_DN;
+	settle_count[resolve_pipe(pipe)] = 0;
+
+	int new_power = TX_POWER[resolve_pipe(pipe)] + rssi_diff;
 
 	TX_POWER[resolve_pipe(pipe)] = CLAMP(new_power, TX_POWER_MIN, TX_POWER_MAX);
 
@@ -649,7 +655,7 @@ K_WORK_DELAYABLE_DEFINE(monitoring_work, monitoring_work_cb);
 
 static void central_setup(void)
 {
-	nrf_radio_shorts_set(NRF_RADIO, RADIO_SHORTS_COMMON);
+	nrf_radio_shorts_set(NRF_RADIO, RADIO_SHORTS_BASIC);
 	nrf_timer_int_enable(esb_timer.p_reg, NRF_TIMER_INT_COMPARE1_MASK);
 	ctx.pipes = ESB_PIPE_COUNT;
 	set_slotsize();
@@ -2154,7 +2160,7 @@ static void central_prepare_tx(void)
 	pdu->pdu.nesn = pipe_info->nesn;
 
 	esb_addr.rf_channel = get_channel(next_slot);
-	tx_packet->header.tx_power = esb_cfg.tx_output_power;
+	tx_packet->header.rssi = rssi_get(pipe);
 
 	on_timer_compare1 = central_timeslot_end;
 
@@ -2246,7 +2252,10 @@ static void central_timeslot_end(void)
 	bool retransmit_payload = (pipe_info->crc == crc) && (tx_nesn != rx_sn);
 	bool send_rx_event = !retransmit_payload;
 
-	rssi_update(pipe, rssi);
+	if (rx_len >= 4) {
+		rssi_update(pipe, rssi);
+	}
+
 	if (send_rx_event) {
 		if (ctrl) {
 			pipe_info->crc = crc;
@@ -2427,7 +2436,6 @@ static void peripheral_disabled_rx(void)
 
 	esb_state = ESB_STATE_PERIPHERAL_TX_ACK;
 
-	// pto_ppi_for_peripheral_prepare_rx_clear();
 	struct pipe_info *pipe_info = rx_pipe_info_get(0);
 
 	// update TX
@@ -2437,7 +2445,6 @@ static void peripheral_disabled_rx(void)
 	uint8_t tx_sn = pipe_info->sn;
 	uint8_t tx_try = pipe_info->tx_try;
 
-	// bool tx_failed = (tx_try > 0) && (tx_sn == rx_nesn);
 	bool tx_failed = (tx_sn == rx_nesn);
 	bool retransmit_payload = (tx_nesn != rx_sn);
 
@@ -2449,9 +2456,6 @@ static void peripheral_disabled_rx(void)
 		pipe_info->nesn = (!pipe_info->nesn);
 	}
 
-	uint8_t rssi = nrf_radio_rssi_sample_get(NRF_RADIO);
-	rssi_update(0, rssi);
-
 	uint8_t tx_len = tx_pdu->pdu.length;
 	if (tx_failed) {
 		if (++pipe_info->tx_try > DESYNC_COUNT_MAX) {
@@ -2460,7 +2464,11 @@ static void peripheral_disabled_rx(void)
 			peripheral_start_desync();
 			return;
 		}
-		// tx_power_raise(0);
+
+		// tx power raise if tx failed 3 times in a row.
+		if ((pipe_info->tx_try & 3) == 3) {
+			tx_power_raise(0);
+		}
 	} else {
 		// if packet before was payload, then tx was successful.
 		if (tx_try > 0) {
@@ -2472,26 +2480,28 @@ static void peripheral_disabled_rx(void)
 		pipe_info->tx_try = tx_len > 0;
 	}
 
+	uint8_t rssi = rx_packet->header.rssi;
+	tx_power_update(ctx.pipe, rssi);
+	esb_cfg.tx_output_power = tx_power_get(ctx.pipe);
+	update_radio_tx_power();
+
 	bool tx_triggered = tx_len > 0 || ctx.is_hb || tx_failed;
 	if (tx_triggered) {
 		if (!tx_failed) {
 			pipe_info->sn = !pipe_info->sn;
 		}
-
 		tx_pdu->pdu.ctrl = tx_len == 0;
-		tx_pdu->pdu.length = tx_len;
+
+		// set tx pdu length to 4 for rssi settle time for central.
+		tx_len = tx_len > 0 ? tx_len : 0;
+
+		tx_pdu->pdu.length = tx_len > 0 ? tx_len : 4;
 		tx_pdu->pdu.sn = pipe_info->sn;
 		tx_pdu->pdu.nesn = pipe_info->nesn;
 		update_rf_payload_format(tx_pdu->pdu.length);
 		nrf_radio_packetptr_set(NRF_RADIO, tx_pdu);
 
 		esb_fem_for_tx_ack();
-		if (ctx.is_hb) {
-			int8_t tx_power = rx_packet->header.tx_power;
-			tx_power_update(ctx.pipe, tx_power);
-			esb_cfg.tx_output_power = tx_power_get(ctx.pipe);
-			update_radio_tx_power();
-		}
 
 		nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_TXEN);
 	}
@@ -2525,9 +2535,10 @@ static void peripheral_disabled_rx(void)
 	}
 
 #if 0
-	LOG_WRN("len [%u %d] tx[%d %d] rx[%d %d] t %d r %d s %d drift %lld rssi %d TR %d", tx_len,
-		rx_len, tx_sn, rx_nesn, tx_nesn, rx_sn, pipe_info->tx_try, retransmit_payload,
-		send_rx_event, drift, (int)(-rssi), tx_triggered);
+	LOG_WRN("len [%u %d] tx[%d %d] rx[%d %d] t %d r %d s %d drift %lld rssi %d tp %d TR %d",
+		tx_len, rx_len, tx_sn, rx_nesn, tx_nesn, rx_sn, pipe_info->tx_try,
+		retransmit_payload, send_rx_event, drift, (int)(-rssi), esb_cfg.tx_output_power,
+		tx_triggered);
 #endif
 }
 

@@ -18,13 +18,13 @@
 LOG_MODULE_DECLARE(esb, CONFIG_ESB_LOG_LEVEL);
 
 static nrf_ppi_channel_t radio_addr_timer_stop;
-static nrf_ppi_channel_t radio_event_capture;
+static nrf_ppi_channel_t crcok_cc2_rssistop;
 static nrf_ppi_channel_t cc0_radio_enable;
 static nrf_ppi_channel_t radio_rx_capture;
 static nrf_ppi_channel_t txdis_rxen;
 static nrf_ppi_channel_t cc1_radio_disable;
 static nrf_ppi_channel_t addr_rssistart;
-static nrf_ppi_channel_t rxdis_rssistop;
+static nrf_ppi_channel_t txdis_g2en;
 static nrf_ppi_channel_t rxready_rssistart;
 
 static nrf_ppi_channel_group_t ppi_group;
@@ -32,52 +32,73 @@ static nrf_ppi_channel_group_t ppi_group2;
 
 void pto_ppi_for_central_tx_set(void)
 {
-	/* 1. CC0 -> TXEN
-	 * 2. TXDIS -> RXEN // group disable
-	 * 3. CRCOK -> CC2, RSSISTOP
-	 * 4. CC1 -> RXDIS
-	 */
+	// cc0 -> txen
 	uint32_t cc0_event =
 		nrf_timer_event_address_get(ESB_NRF_TIMER_INSTANCE, NRF_TIMER_EVENT_COMPARE0);
 	uint32_t txen_task = nrf_radio_task_address_get(NRF_RADIO, NRF_RADIO_TASK_TXEN);
+
+	// group1:  txdis -> rxen, group1 dis, group2 en
 	uint32_t radio_disabled_event =
 		nrf_radio_event_address_get(NRF_RADIO, NRF_RADIO_EVENT_DISABLED);
 	uint32_t rxen_task = nrf_radio_task_address_get(NRF_RADIO, NRF_RADIO_TASK_RXEN);
-	uint32_t group_disable_task = nrf_ppi_task_group_disable_address_get(NRF_PPI, ppi_group);
+	uint32_t group1_disable_task = nrf_ppi_task_group_disable_address_get(NRF_PPI, ppi_group);
+	uint32_t group2_enable_task = nrf_ppi_task_group_enable_address_get(NRF_PPI, ppi_group2);
+
+	// group2: addr -> rssi en
+	uint32_t addr_event = nrf_radio_event_address_get(NRF_RADIO, NRF_RADIO_EVENT_ADDRESS);
+	uint32_t rssistart_task = nrf_radio_task_address_get(NRF_RADIO, NRF_RADIO_TASK_RSSISTART);
+
+	// group2: crcok -> cc2 capture, rssi dis
 	uint32_t crcok_event = nrf_radio_event_address_get(NRF_RADIO, NRF_RADIO_EVENT_CRCOK);
 	uint32_t cc2_capture_task =
 		nrf_timer_task_address_get(ESB_NRF_TIMER_INSTANCE, NRF_TIMER_TASK_CAPTURE2);
+	uint32_t rssistop_task = nrf_radio_task_address_get(NRF_RADIO, NRF_RADIO_TASK_RSSISTOP);
+
+	// cc1 -> rxdis
 	uint32_t cc1_event =
 		nrf_timer_event_address_get(ESB_NRF_TIMER_INSTANCE, NRF_TIMER_EVENT_COMPARE1);
 	uint32_t radio_disable_task = nrf_radio_task_address_get(NRF_RADIO, NRF_RADIO_TASK_DISABLE);
 
 	nrf_ppi_channel_endpoint_setup(NRF_PPI, cc0_radio_enable, cc0_event, txen_task);
 	nrf_ppi_channel_and_fork_endpoint_setup(NRF_PPI, txdis_rxen, radio_disabled_event,
-						rxen_task, group_disable_task);
-	nrf_ppi_channel_endpoint_setup(NRF_PPI, radio_event_capture, crcok_event, cc2_capture_task);
+						rxen_task, group1_disable_task);
+	nrf_ppi_channel_endpoint_setup(NRF_PPI, txdis_g2en, radio_disabled_event,
+				       group2_enable_task);
+	nrf_ppi_channel_endpoint_setup(NRF_PPI, addr_rssistart, addr_event, rssistart_task);
+	nrf_ppi_channel_and_fork_endpoint_setup(NRF_PPI, crcok_cc2_rssistop, crcok_event,
+						cc2_capture_task, rssistop_task);
 	nrf_ppi_channel_endpoint_setup(NRF_PPI, cc1_radio_disable, cc1_event, radio_disable_task);
 
-	nrf_ppi_channel_include_in_group(NRF_PPI, txdis_rxen, ppi_group);
+	uint32_t channels = BIT(cc0_radio_enable) | BIT(txdis_rxen) | BIT(txdis_g2en) |
+			    BIT(addr_rssistart) | BIT(crcok_cc2_rssistop) | BIT(cc1_radio_disable);
 
-	uint32_t channels = BIT(cc0_radio_enable) | BIT(txdis_rxen) | BIT(radio_event_capture) |
-			    BIT(cc1_radio_disable);
+	nrf_ppi_channels_include_in_group(NRF_PPI, BIT(txdis_rxen) | BIT(txdis_g2en), ppi_group);
+	nrf_ppi_channels_include_in_group(NRF_PPI, BIT(addr_rssistart) | BIT(crcok_cc2_rssistop),
+					  ppi_group2);
+
+	nrf_ppi_group_enable(NRF_PPI, ppi_group);
+	nrf_ppi_group_disable(NRF_PPI, ppi_group2);
 
 	nrf_ppi_channels_enable(NRF_PPI, channels);
 }
 
 void pto_ppi_for_central_tx_clear(void)
 {
-	uint32_t channels = BIT(cc0_radio_enable) | BIT(txdis_rxen) | BIT(radio_event_capture) |
-			    BIT(cc1_radio_disable);
+	uint32_t channels = BIT(cc0_radio_enable) | BIT(txdis_rxen) | BIT(txdis_g2en) |
+			    BIT(addr_rssistart) | BIT(crcok_cc2_rssistop) | BIT(cc1_radio_disable);
 
 	nrf_ppi_channels_disable(NRF_PPI, channels);
 
 	nrf_ppi_channel_endpoint_setup(NRF_PPI, cc0_radio_enable, 0, 0);
 	nrf_ppi_channel_and_fork_endpoint_setup(NRF_PPI, txdis_rxen, 0, 0, 0);
-	nrf_ppi_channel_endpoint_setup(NRF_PPI, radio_event_capture, 0, 0);
+	nrf_ppi_channel_endpoint_setup(NRF_PPI, txdis_g2en, 0, 0);
+	nrf_ppi_channel_endpoint_setup(NRF_PPI, addr_rssistart, 0, 0);
+	nrf_ppi_channel_and_fork_endpoint_setup(NRF_PPI, crcok_cc2_rssistop, 0, 0, 0);
 	nrf_ppi_channel_endpoint_setup(NRF_PPI, cc1_radio_disable, 0, 0);
 
-	nrf_ppi_channel_remove_from_group(NRF_PPI, txdis_rxen, ppi_group);
+	nrf_ppi_channels_remove_from_group(NRF_PPI, BIT(txdis_rxen) | BIT(txdis_g2en), ppi_group);
+	nrf_ppi_channels_remove_from_group(NRF_PPI, BIT(addr_rssistart) | BIT(crcok_cc2_rssistop),
+					   ppi_group2);
 }
 
 void pto_ppi_for_peripheral_start_rx_desync_set(void)
@@ -94,11 +115,11 @@ void pto_ppi_for_peripheral_start_rx_desync_set(void)
 
 	nrf_ppi_channel_endpoint_setup(NRF_PPI, cc0_radio_enable, cc0_event, radio_enable_task);
 	nrf_ppi_channel_endpoint_setup(NRF_PPI, cc1_radio_disable, cc1_event, radio_disable_task);
-	nrf_ppi_channel_endpoint_setup(NRF_PPI, radio_event_capture, radio_addr_event,
+	nrf_ppi_channel_endpoint_setup(NRF_PPI, crcok_cc2_rssistop, radio_addr_event,
 				       cc2_capture_task);
 
 	uint32_t channels =
-		BIT(radio_event_capture) | BIT(cc1_radio_disable) | BIT(cc0_radio_enable);
+		BIT(crcok_cc2_rssistop) | BIT(cc1_radio_disable) | BIT(cc0_radio_enable);
 
 	nrf_ppi_channels_enable(NRF_PPI, channels);
 }
@@ -106,12 +127,12 @@ void pto_ppi_for_peripheral_start_rx_desync_set(void)
 void pto_ppi_for_peripheral_start_rx_desync_clear(void)
 {
 	uint32_t channels =
-		BIT(radio_event_capture) | BIT(cc1_radio_disable) | BIT(cc0_radio_enable);
+		BIT(crcok_cc2_rssistop) | BIT(cc1_radio_disable) | BIT(cc0_radio_enable);
 
 	nrf_ppi_channels_disable(NRF_PPI, channels);
 	nrf_ppi_channel_endpoint_setup(NRF_PPI, cc0_radio_enable, 0, 0);
 	nrf_ppi_channel_endpoint_setup(NRF_PPI, cc1_radio_disable, 0, 0);
-	nrf_ppi_channel_endpoint_setup(NRF_PPI, radio_event_capture, 0, 0);
+	nrf_ppi_channel_endpoint_setup(NRF_PPI, crcok_cc2_rssistop, 0, 0);
 }
 
 void pto_ppi_for_peripheral_prepare_rx_set(void)
@@ -133,13 +154,13 @@ void pto_ppi_for_peripheral_prepare_rx_set(void)
 
 	nrf_ppi_channel_endpoint_setup(NRF_PPI, cc0_radio_enable, cc0_event, radio_rxen_task);
 	nrf_ppi_channel_endpoint_setup(NRF_PPI, cc1_radio_disable, cc1_event, radio_rxdis_task);
-	nrf_ppi_channel_endpoint_setup(NRF_PPI, radio_event_capture, radio_addr_event,
+	nrf_ppi_channel_endpoint_setup(NRF_PPI, crcok_cc2_rssistop, radio_addr_event,
 				       cc2_capture_task);
 	nrf_ppi_channel_and_fork_endpoint_setup(NRF_PPI, radio_rx_capture, crcok_event,
 						cc3_capture_task, group_disable_task);
 
 	uint32_t channels = BIT(cc0_radio_enable) | BIT(cc1_radio_disable) |
-			    BIT(radio_event_capture) | BIT(radio_rx_capture);
+			    BIT(crcok_cc2_rssistop) | BIT(radio_rx_capture);
 
 	nrf_ppi_channel_include_in_group(NRF_PPI, cc1_radio_disable, ppi_group);
 
@@ -149,13 +170,13 @@ void pto_ppi_for_peripheral_prepare_rx_set(void)
 void pto_ppi_for_peripheral_prepare_rx_clear(void)
 {
 	uint32_t channels = BIT(cc0_radio_enable) | BIT(cc1_radio_disable) |
-			    BIT(radio_event_capture) | BIT(radio_rx_capture);
+			    BIT(crcok_cc2_rssistop) | BIT(radio_rx_capture);
 
 	nrf_ppi_channels_disable(NRF_PPI, channels);
 
 	nrf_ppi_channel_endpoint_setup(NRF_PPI, cc0_radio_enable, 0, 0);
 	nrf_ppi_channel_endpoint_setup(NRF_PPI, cc1_radio_disable, 0, 0);
-	nrf_ppi_channel_endpoint_setup(NRF_PPI, radio_event_capture, 0, 0);
+	nrf_ppi_channel_endpoint_setup(NRF_PPI, crcok_cc2_rssistop, 0, 0);
 	nrf_ppi_channel_and_fork_endpoint_setup(NRF_PPI, radio_rx_capture, 0, 0, 0);
 
 	nrf_ppi_channel_remove_from_group(NRF_PPI, cc1_radio_disable, ppi_group);
@@ -186,7 +207,7 @@ int esb_ppi_init(void)
 		goto error;
 	}
 
-	err = nrfx_ppi_channel_alloc(&radio_event_capture);
+	err = nrfx_ppi_channel_alloc(&crcok_cc2_rssistop);
 	if (err != NRFX_SUCCESS) {
 		goto error;
 	}
@@ -216,7 +237,7 @@ int esb_ppi_init(void)
 		goto error;
 	}
 
-	err = nrfx_ppi_channel_alloc(&rxdis_rssistop);
+	err = nrfx_ppi_channel_alloc(&txdis_g2en);
 	if (err != NRFX_SUCCESS) {
 		goto error;
 	}
@@ -253,7 +274,7 @@ uint32_t esb_ppi_radio_disabled_get(void)
 void esb_ppi_disable_all(void)
 {
 	uint32_t channels_mask = BIT(radio_rx_capture) | BIT(cc1_radio_disable) | BIT(txdis_rxen) |
-				 BIT(radio_addr_timer_stop) | BIT(radio_event_capture) |
+				 BIT(radio_addr_timer_stop) | BIT(crcok_cc2_rssistop) |
 				 BIT(addr_rssistart) | BIT(cc0_radio_enable) |
 				 BIT(rxready_rssistart);
 
@@ -269,7 +290,7 @@ void esb_ppi_deinit(void)
 		goto error;
 	}
 
-	err = nrfx_ppi_channel_free(radio_event_capture);
+	err = nrfx_ppi_channel_free(crcok_cc2_rssistop);
 	if (err != NRFX_SUCCESS) {
 		goto error;
 	}
@@ -299,7 +320,7 @@ void esb_ppi_deinit(void)
 		goto error;
 	}
 
-	err = nrfx_ppi_channel_free(rxdis_rssistop);
+	err = nrfx_ppi_channel_free(txdis_g2en);
 	if (err != NRFX_SUCCESS) {
 		goto error;
 	}
