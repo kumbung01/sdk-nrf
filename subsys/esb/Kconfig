@@ -71,6 +71,10 @@ config ESB_TX_RINGBUF_SIZE
 	int "set tx ringbuf size"
 	default 256
 
+config ESB_WHITEEN
+	bool "enable data whitening"
+	default y
+
 choice ESB_POLLING_RATE_SEL
     prompt "Polling rate"
     default ESB_POLLING_RATE_1KHZ

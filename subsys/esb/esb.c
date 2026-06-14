@@ -34,6 +34,26 @@
 
 LOG_MODULE_REGISTER(esb, CONFIG_ESB_LOG_LEVEL);
 
+// #define LOG_ALL
+// #define MONITORING_WORK
+
+#ifdef LOG_ALL
+#define CENTRAL_LOG_ALL
+#define PERIPHERAL_LOG_ALL
+#endif
+
+#ifdef CENTRAL_LOG_ALL
+#define CENTRAL_LOG_TS_START
+#define CENTRAL_LOG_TS_END
+#endif
+
+#ifdef PERIPHERAL_LOG_ALL
+#define PERIPHERAL_LOG_DS_START
+#define PERIPHERAL_LOG_DS_END
+#define PERIPHERAL_LOG_TS_START
+#define PERIPHERAL_LOG_TS_END
+#endif
+
 /* Constants */
 
 /* 2 Mb RX wait for acknowledgment time-out value.
@@ -638,7 +658,7 @@ static void set_addr_delay(void)
 }
 
 #if CONFIG_ESB_CENTRAL
-
+#ifdef MONITORING_WORK
 void monitoring_work_cb(struct k_work *work)
 {
 	printk("pipe  rssi\n");
@@ -652,7 +672,7 @@ void monitoring_work_cb(struct k_work *work)
 	k_work_reschedule(dwork, K_SECONDS(1));
 }
 K_WORK_DELAYABLE_DEFINE(monitoring_work, monitoring_work_cb);
-
+#endif
 static void central_setup(void)
 {
 	nrf_radio_shorts_set(NRF_RADIO, RADIO_SHORTS_BASIC);
@@ -668,7 +688,7 @@ static void central_setup(void)
 }
 
 #else
-
+#ifdef MONITORING_WORK
 void monitoring_work_cb(struct k_work *work)
 {
 	int rssi = -rssi_get(ctx.pipe);
@@ -683,6 +703,7 @@ void monitoring_work_cb(struct k_work *work)
 	k_work_reschedule(dwork, K_SECONDS(1));
 }
 K_WORK_DELAYABLE_DEFINE(monitoring_work, monitoring_work_cb);
+#endif
 
 static void peripheral_setup(void)
 {
@@ -1063,7 +1084,11 @@ static void update_rf_payload_format_esb_dpl(uint32_t payload_length)
 
 	/* Using 6 bits or 8 bits for length */
 	packet_config.lflen = (CONFIG_ESB_MAX_PAYLOAD_LENGTH <= 32) ? 6 : 8;
+#if CONFIG_ESB_WHITEEN
+	packet_config.whiteen = true;
+#else
 	packet_config.whiteen = false;
+#endif
 	packet_config.big_endian = true;
 	packet_config.balen = (esb_addr.addr_length - 1);
 	packet_config.statlen = 0;
@@ -1416,19 +1441,33 @@ static bool update_radio_crc(void)
 	switch (esb_cfg.crc) {
 	case ESB_CRC_16BIT:
 		nrf_radio_crcinit_set(NRF_RADIO, 0xFFFFUL); /* Initial value */
+#if CONFIG_ESB_WHITEEN
+		nrf_radio_crc_configure(NRF_RADIO, ESB_CRC_16BIT, NRF_RADIO_CRC_ADDR_SKIP,
+					0x11021UL); /* CRC poly: x^16+x^12^x^5+1 */
+#else
 		nrf_radio_crc_configure(NRF_RADIO, ESB_CRC_16BIT, NRF_RADIO_CRC_ADDR_INCLUDE,
 					0x11021UL); /* CRC poly: x^16+x^12^x^5+1 */
+#endif
 		break;
 
 	case ESB_CRC_8BIT:
 		nrf_radio_crcinit_set(NRF_RADIO, 0xFFUL); /* Initial value */
+#if CONFIG_ESB_WHITEEN
+		nrf_radio_crc_configure(NRF_RADIO, ESB_CRC_8BIT, NRF_RADIO_CRC_ADDR_SKIP,
+					0x107UL); /* CRC poly: x^8+x^2^x^1+1 */
+#else
 		nrf_radio_crc_configure(NRF_RADIO, ESB_CRC_8BIT, NRF_RADIO_CRC_ADDR_INCLUDE,
 					0x107UL); /* CRC poly: x^8+x^2^x^1+1 */
+#endif
 		break;
 
 	case ESB_CRC_OFF:
 		nrf_radio_crcinit_set(NRF_RADIO, 0x00UL);
+#if CONFIG_ESB_WHITEEN
+		nrf_radio_crc_configure(NRF_RADIO, ESB_CRC_OFF, NRF_RADIO_CRC_ADDR_SKIP, 0x00UL);
+#else
 		nrf_radio_crc_configure(NRF_RADIO, ESB_CRC_OFF, NRF_RADIO_CRC_ADDR_INCLUDE, 0x00UL);
+#endif
 
 		break;
 
@@ -1900,8 +1939,9 @@ int esb_init(const struct esb_config *config)
 #else
 	peripheral_setup();
 #endif
-	// k_work_reschedule(&monitoring_work, K_SECONDS(1));
-
+#ifdef MONITORING_WORK
+	k_work_reschedule(&monitoring_work, K_SECONDS(1));
+#endif
 	return 0;
 }
 
@@ -2160,6 +2200,9 @@ static void central_prepare_tx(void)
 	pdu->pdu.nesn = pipe_info->nesn;
 
 	esb_addr.rf_channel = get_channel(next_slot);
+#if CONFIG_ESB_WHITEEN
+	nrf_radio_datawhiteiv_set(NRF_RADIO, esb_addr.rf_channel);
+#endif
 	tx_packet->header.rssi = rssi_get(pipe);
 
 	on_timer_compare1 = central_timeslot_end;
@@ -2184,11 +2227,12 @@ static void central_prepare_tx(void)
 
 	// LOG_WRN("PIPE %u NOW %u TX %u TO %u SL %u CH %u LEN %u", pipe, now,
 	// tx_start, timeout, 	next_slot, esb_addr.rf_channel, packet_length);
-
-	// LOG_WRN("PIPE %u SLOT %u CH %u RSSI %d LEN %u SN %d %d SYNC %d CTRL %d ",
-	// pipe, next_slot, 	esb_addr.rf_channel, (int)(buf->header.rssi),
-	// packet_length, pipe_info->sn, 	pipe_info->nesn, slot_synced,
-	// pdu->pdu.ctrl);
+#ifdef CENTRAL_LOG_TS_START
+	LOG_WRN("PIPE %u SLOT %u CH %u RSSI %d LEN %u SN %d %d SYNC %d CTRL %d WT %u", pipe,
+		ctx.refslot, esb_addr.rf_channel, (int)(tx_packet->header.rssi), packet_length,
+		pipe_info->sn, pipe_info->nesn, slot_synced, pdu->pdu.ctrl,
+		nrf_radio_datawhiteiv_get(NRF_RADIO));
+#endif
 }
 
 static void central_timeslot_end(void)
@@ -2269,7 +2313,7 @@ static void central_timeslot_end(void)
 
 	// prepare for next slot
 	central_prepare_tx();
-#if 0
+#ifdef CENTRAL_LOG_TS_END
 	LOG_WRN("pipe %u rx_len %u rssi -%u crc %lx tx[%d %d] rx[%d %d] r %d s %d", pipe, rx_len,
 		rssi, crc, tx_sn, rx_nesn, tx_nesn, rx_sn, retransmit_payload,
 		(retransmit_payload && rx_len > 0));
@@ -2301,6 +2345,9 @@ static void peripheral_start_desync(void)
 	on_radio_disabled = peripheral_disabled_desync;
 
 	esb_addr.rf_channel = get_channel(sys_rand32_get());
+#if CONFIG_ESB_WHITEEN
+	nrf_radio_datawhiteiv_set(NRF_RADIO, esb_addr.rf_channel);
+#endif
 	nrf_radio_frequency_set(NRF_RADIO, (RADIO_BASE_FREQUENCY + esb_addr.rf_channel));
 
 	set_rx_packetptr();
@@ -2308,8 +2355,10 @@ static void peripheral_start_desync(void)
 	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_CRCOK);
 
 	pto_ppi_for_peripheral_start_rx_desync_set();
-	// LOG_WRN("start rx desync CHAN(%u), DESYNC(%u) PIPE(%u)", esb_addr.rf_channel,
-	// 	ctx.desync_count, ctx.pipe);
+#ifdef PERIPHERAL_LOG_DS_START
+	LOG_WRN("start rx desync CHAN(%u), DESYNC(%u) PIPE(%u) WT(%u)", esb_addr.rf_channel,
+		ctx.desync_count, ctx.pipe, nrf_radio_datawhiteiv_get(NRF_RADIO));
+#endif
 }
 
 static void peripheral_disabled_desync(void)
@@ -2338,9 +2387,10 @@ static void peripheral_disabled_desync(void)
 	ctx.last_hb = nrf_timer_cc_get(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL2) - ctx.addr_delay;
 
 	set_sync_evt_interrupt(ctx.pipe, true);
-
-	// LOG_WRN("disabled rx desync: REF(%u) SYNC(%u) SN[%d %d] CTRL %d", ctx.refslot,
-	// ctx.last_hb, 	rx_sn, rx_nesn, ctrl);
+#ifdef PERIPHERAL_LOG_DS_END
+	LOG_WRN("disabled rx desync: REF(%u) SYNC(%u) SN[%d %d] CTRL %d", ctx.refslot, ctx.last_hb,
+		rx_sn, rx_nesn, ctrl);
+#endif
 
 	peripheral_prepare_rx();
 }
@@ -2386,6 +2436,9 @@ static void peripheral_prepare_rx(void)
 	ctx.slotdiff = loops_diff * ctx.pipes;
 	uint32_t slot = ctx.refslot + ctx.slotdiff;
 	esb_addr.rf_channel = get_channel(slot);
+#if CONFIG_ESB_WHITEEN
+	nrf_radio_datawhiteiv_set(NRF_RADIO, esb_addr.rf_channel);
+#endif
 	nrf_radio_frequency_set(NRF_RADIO, (RADIO_BASE_FREQUENCY + esb_addr.rf_channel));
 
 	nrf_timer_cc_set(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL0, rx_start);
@@ -2402,10 +2455,11 @@ static void peripheral_prepare_rx(void)
 	    !nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_RXREADY)) {
 		nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_RXEN);
 	}
-
-	// LOG_WRN("now %u start %u slot %u ch %u drift %ld hb %d tx %d dsync %u", now, rx_start,
-	// slot, 	esb_addr.rf_channel, drift, ctx.is_hb, tx_power_get(ctx.channel_idx),
-	// 	ctx.desync_count);
+#ifdef PERIPHERAL_LOG_TS_START
+	LOG_WRN("now %u start %u slot %u ch %u drift %ld hb %d tx %d dsync %u WT %u", now, rx_start,
+		slot, esb_addr.rf_channel, drift, ctx.is_hb, tx_power_get(ctx.channel_idx),
+		ctx.desync_count, nrf_radio_datawhiteiv_get(NRF_RADIO));
+#endif
 }
 
 static void peripheral_disabled_rx(void)
@@ -2471,13 +2525,17 @@ static void peripheral_disabled_rx(void)
 		}
 	} else {
 		// if packet before was payload, then tx was successful.
-		if (tx_try > 0) {
+		if (tx_try > 0 && !tx_pdu->pdu.ctrl) {
 			set_tx_evt_interrupt(0, true);
 			uint32_t popped = pop_tx(0);
 		}
 
 		tx_len = copy_tx(0, tx_pdu->data);
 		pipe_info->tx_try = tx_len > 0;
+
+		// set tx pdu length to 4 for rssi settle time for central.
+		tx_pdu->pdu.length = tx_len > 0 ? tx_len : 4;
+		tx_pdu->pdu.ctrl = tx_len == 0;
 	}
 
 	uint8_t rssi = rx_packet->header.rssi;
@@ -2490,12 +2548,7 @@ static void peripheral_disabled_rx(void)
 		if (!tx_failed) {
 			pipe_info->sn = !pipe_info->sn;
 		}
-		tx_pdu->pdu.ctrl = tx_len == 0;
 
-		// set tx pdu length to 4 for rssi settle time for central.
-		tx_len = tx_len > 0 ? tx_len : 0;
-
-		tx_pdu->pdu.length = tx_len > 0 ? tx_len : 4;
 		tx_pdu->pdu.sn = pipe_info->sn;
 		tx_pdu->pdu.nesn = pipe_info->nesn;
 		update_rf_payload_format(tx_pdu->pdu.length);
@@ -2534,7 +2587,7 @@ static void peripheral_disabled_rx(void)
 		peripheral_disabled_tx_ack();
 	}
 
-#if 0
+#ifdef PERIPHERAL_LOG_TS_END
 	LOG_WRN("len [%u %d] tx[%d %d] rx[%d %d] t %d r %d s %d drift %lld rssi %d tp %d TR %d",
 		tx_len, rx_len, tx_sn, rx_nesn, tx_nesn, rx_sn, pipe_info->tx_try,
 		retransmit_payload, send_rx_event, drift, (int)(-rssi), esb_cfg.tx_output_power,
