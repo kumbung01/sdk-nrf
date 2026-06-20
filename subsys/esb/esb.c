@@ -39,7 +39,6 @@ LOG_MODULE_REGISTER(esb, CONFIG_ESB_LOG_LEVEL);
 
 // #define LOG_ALL
 // #define MONITORING_WORK
-#define PERIPHERAL_LOG_ALL
 
 #ifdef LOG_ALL
 #define CENTRAL_LOG_ALL
@@ -407,7 +406,7 @@ static void set_slotsize()
 
 	ctx.window_size = ctx.slotsize / 2;
 
-	LOG_WRN("slot %u window %u slots %u", ctx.slotsize, ctx.window_size, ctx.pipes);
+	// LOG_WRN("slot %u window %u slots %u", ctx.slotsize, ctx.window_size, ctx.pipes);
 }
 
 static void set_hb_loops(void)
@@ -415,7 +414,7 @@ static void set_hb_loops(void)
 	uint32_t loop_size = ctx.slotsize * ctx.pipes;
 	ctx.hb_loops = 32768 / loop_size;
 
-	LOG_WRN("HEARTBEAT LOOPS(%u) SIZE(%u)", ctx.hb_loops, ctx.hb_loops * loop_size);
+	// LOG_WRN("HEARTBEAT LOOPS(%u) SIZE(%u)", ctx.hb_loops, ctx.hb_loops * loop_size);
 }
 
 static void set_control_packet(void *data)
@@ -449,8 +448,8 @@ static void apply_control_packet(void *data)
 	ctx.timeout_count_max =
 		k_ms_to_ticks_near32(DESYNC_LIMIT_MS_PERIPHERAL) / (ctx.slotsize * ctx.pipes);
 
-	LOG_WRN("slot %u window %u slots %u to max %u", ctx.slotsize, ctx.window_size, ctx.pipes,
-		ctx.timeout_count_max);
+	// LOG_WRN("slot %u window %u slots %u to max %u", ctx.slotsize, ctx.window_size, ctx.pipes,
+	// 	ctx.timeout_count_max);
 	set_hb_loops();
 }
 
@@ -2659,7 +2658,7 @@ static void peripheral_disabled_rx(void)
 	bool is_timeout = !nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_CRCOK);
 	if (is_timeout) {
 		if (++ctx.timeout_count > ctx.timeout_count_max) {
-			LOG_WRN("timeout");
+			// LOG_WRN("timeout");
 
 			// something's wrong, disable radio and goto desync state
 			hfclk_off();
