@@ -39,8 +39,6 @@ LOG_MODULE_REGISTER(esb, CONFIG_ESB_LOG_LEVEL);
 
 // #define LOG_ALL
 // #define MONITORING_WORK
-#define CENTRAL_LOG_TS_END
-#define PERIPHERAL_LOG_ALL
 
 #ifdef LOG_ALL
 #define CENTRAL_LOG_ALL
@@ -262,7 +260,7 @@ static volatile enum esb_state esb_state = ESB_STATE_IDLE;
 static struct esb_tdma_context {
 	uint32_t last_hb; // last heartbeat timer value
 	int32_t drift;	  // drift between central and peripheral
-	int32_t drift_est;
+	int32_t drift_now;
 	uint32_t refslot;      // refslot from central
 	uint32_t hb_loops;     // calculated hb loops
 	uint32_t slotsize;     // slot size
@@ -320,13 +318,15 @@ K_MSGQ_DEFINE(sync_event_msgq, sizeof(struct esb_evt), ESB_PIPE_COUNT * 2, 4);
 #define RADIO_MARGIN	   (60)
 #define TIMEOUT_MARGIN	   (90)
 #define HFCLK_WARMUP_DELAY (360)
-#define WINDOW_MARGIN	   (60)
+#define WINDOW_MARGIN	   (30)
+#define DRIFT_MARGIN	   (30)
 #define ISR_MARGIN	   (30)
 
 #define RADIO_MARGIN_TICKS	 (RADIO_MARGIN / TICK)
 #define TIMEOUT_MARGIN_TICKS	 (TIMEOUT_MARGIN / TICK)
 #define HFCLK_WARMUP_DELAY_TICKS (HFCLK_WARMUP_DELAY / TICK)
 #define WINDOW_MARGIN_TICKS	 (WINDOW_MARGIN / TICK)
+#define DRIFT_MARGIN_TICKS	 (DRIFT_MARGIN / TICK)
 #define ISR_MARGIN_TICKS	 (ISR_MARGIN / TICK)
 
 #define HEARTBEAT_INTERVAL    1000000
@@ -488,7 +488,7 @@ static void hfclk_on(void)
 
 	z_nrf_clock_bt_ctlr_hf_request();
 	hfclk_is_on = true;
-	LOG_WRN("HF clock on.");
+	// LOG_WRN("HF clock on.");
 }
 
 static void hfclk_off(void)
@@ -500,7 +500,7 @@ static void hfclk_off(void)
 	z_nrf_clock_bt_ctlr_hf_release();
 	hfclk_is_on = false;
 
-	LOG_WRN("HF clock released.");
+	// LOG_WRN("HF clock released.");
 }
 
 #if CONFIG_ESB_CENTRAL
@@ -623,6 +623,7 @@ static inline void drift_reset(void)
 {
 	drift_initialized = true;
 	ctx.drift = 0;
+	ctx.drift_now = 0;
 }
 
 static inline void drift_update(int32_t drift)
@@ -2460,7 +2461,7 @@ static void set_rx_packetptr(void)
 
 static void hfclk_on_isr(void)
 {
-	LOG_WRN("hfclk isr");
+	// LOG_WRN("hfclk isr");
 	rtc_irq_disable();
 	hfclk_on();
 }
@@ -2581,11 +2582,21 @@ static void peripheral_prepare_rx(void)
 
 	ctx.is_hb = (loops_diff % ctx.hb_loops) == 0;
 
-	int32_t drift_ticks = drift_get_ticks(diff);
-	uint32_t rx_start = WRAP24BIT(ctx.last_hb + diff + drift_ticks - WINDOW_MARGIN_TICKS);
+	ctx.drift_now = drift_get_us(diff);
+	// since cc has to be unsigned int, so we add margin.
+	uint32_t drift_margin_ticks = ctx.drift_now < 0 ? -k_us_to_ticks_ceil32(-ctx.drift_now) : 0;
+	uint32_t drift_margin = k_ticks_to_us_ceil32(drift_margin_ticks);
+	uint32_t drift_final = ctx.drift_now + drift_margin == 0 ? 2 : ctx.drift_now + drift_margin;
+
+	uint32_t rx_start =
+		WRAP24BIT(ctx.last_hb + diff - WINDOW_MARGIN_TICKS - drift_margin_ticks);
 	uint32_t rx_timeout = k_ticks_to_us_near32(ctx.window_size) + WINDOW_MARGIN;
 	ctx.start = rx_start;
 	ctx.timeout = rx_timeout;
+
+	nrf_rtc_cc_set(esb_rtc.p_reg, 0, rx_start);
+	nrf_timer_cc_set(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL0, drift_final);
+	nrf_timer_cc_set(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL1, rx_timeout);
 
 	if (!hfclk_is_on) {
 		if (send_data || WRAP24BIT(rx_start - now) < (clock_delay + ISR_MARGIN_TICKS)) {
@@ -2606,8 +2617,6 @@ static void peripheral_prepare_rx(void)
 #endif
 	nrf_radio_frequency_set(NRF_RADIO, (RADIO_BASE_FREQUENCY + esb_addr.rf_channel));
 
-	nrf_rtc_cc_set(esb_rtc.p_reg, 0, rx_start);
-	nrf_timer_cc_set(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL1, rx_timeout);
 	esb_state = (ctx.is_hb && (!send_data)) ? ESB_STATE_PERIPHERAL_RX_READY
 						: ESB_STATE_PERIPHERAL_RX;
 
@@ -2615,14 +2624,14 @@ static void peripheral_prepare_rx(void)
 
 	on_radio_disabled = peripheral_disabled_rx;
 
-	if (nrf_rtc_event_check(esb_rtc.p_reg, NRF_RTC_EVENT_COMPARE_0) &&
-	    !nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_RXREADY)) {
-		nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_RXEN);
+	if (nrfy_rtc_event_check(esb_rtc.p_reg, NRF_RTC_EVENT_COMPARE_0) &&
+	    !nrfy_timer_event_check(esb_timer.p_reg, NRF_TIMER_EVENT_COMPARE0)) {
+		nrfy_timer_task_trigger(esb_timer.p_reg, NRF_TIMER_TASK_START);
 	}
 #ifdef PERIPHERAL_LOG_TS_START
-	LOG_WRN("now %u start %u slot %u ch %u drift %ld %ld hb %d tx %d sd %d", now, rx_start,
-		slot, esb_addr.rf_channel, drift_ticks, drift_get_us(diff), ctx.is_hb,
-		tx_power_get(ctx.channel_idx), send_data);
+	LOG_WRN("now %u start %u slot %u ch %u drift %ld hb %d tx %d sd %d", now, rx_start, slot,
+		esb_addr.rf_channel, ctx.drift_now, ctx.is_hb, tx_power_get(ctx.channel_idx),
+		send_data);
 #endif
 }
 
@@ -2635,7 +2644,7 @@ static void peripheral_disabled_rx(void)
 
 	bool is_timeout = !nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_CRCOK);
 	if (is_timeout) {
-		LOG_WRN("timeout");
+		// LOG_WRN("timeout");
 		if (++ctx.timeout_count > DESYNC_COUNT_MAX) {
 			// something's wrong, disable radio and goto desync state
 			hfclk_off();
@@ -2733,7 +2742,7 @@ static void peripheral_disabled_rx(void)
 	ctx.timeout_count = 0;
 
 	// set sync
-	int64_t drift = sync - WINDOW_MARGIN;
+	int64_t drift = sync - WINDOW_MARGIN - ctx.drift_now;
 	int32_t sync_ticks = 0;
 
 	if (ctx.is_hb) {
@@ -2762,12 +2771,10 @@ static void peripheral_disabled_rx(void)
 	}
 
 #ifdef PERIPHERAL_LOG_TS_END
-	LOG_WRN("start %u sync %lld %ld drift %lld rssi %d TR %d", ctx.start, sync, sync_ticks,
-		drift, rssi_sampled, tx_triggered);
-	// LOG_WRN("len [%u %d] tx[%d %d] rx[%d %d] t %d r %d s %d drift %lld rssi %d tp %d TR %d",
-	// 	tx_len, rx_len, tx_sn, rx_nesn, tx_nesn, rx_sn, pipe_info->tx_try,
-	// 	retransmit_payload, send_rx_event, drift, (int)(-rssi), esb_cfg.tx_output_power,
-	// 	tx_triggered);
+	LOG_WRN("len [%u %d] tx[%d %d] rx[%d %d] t %d r %d s %d drift %lld rssi %d tp %d TR %d",
+		tx_len, rx_len, tx_sn, rx_nesn, tx_nesn, rx_sn, pipe_info->tx_try,
+		retransmit_payload, send_rx_event, drift, (int)(-rssi), esb_cfg.tx_output_power,
+		tx_triggered);
 #endif
 
 	if (!tx_triggered) {
