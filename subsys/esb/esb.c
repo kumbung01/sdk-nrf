@@ -39,6 +39,7 @@ LOG_MODULE_REGISTER(esb, CONFIG_ESB_LOG_LEVEL);
 
 // #define LOG_ALL
 // #define MONITORING_WORK
+#define PERIPHERAL_LOG_ALL
 
 #ifdef LOG_ALL
 #define CENTRAL_LOG_ALL
@@ -269,11 +270,12 @@ static struct esb_tdma_context {
 	uint32_t timeout;      // current timeout timer value
 	uint32_t desync_count; // number of times that peripheral has desynced
 	uint32_t slotdiff;
-	uint8_t pipe;	       // current pipe(fixed for periheral)
-	uint8_t timeout_count; // desync count
-	uint8_t addr_delay;    // calcualted addr delay
-	uint8_t channel_idx;   // current channel index(for rssi, tx_power)
-	uint8_t pipes;	       // number of pipes that are enabled
+	uint8_t pipe;		// current pipe(fixed for periheral)
+	uint16_t timeout_count; // desync count
+	uint16_t timeout_count_max;
+	uint8_t addr_delay;  // calcualted addr delay
+	uint8_t channel_idx; // current channel index(for rssi, tx_power)
+	uint8_t pipes;	     // number of pipes that are enabled
 
 	bool is_hb; // true if current slot is heartbeat
 } ctx;
@@ -291,7 +293,7 @@ struct esb_header_dn {
 } __packed;
 
 struct esb_header_up {
-	uint8_t dummy[5];
+	uint8_t dummy[4];
 } __packed;
 
 struct esb_packet_dn {
@@ -312,15 +314,16 @@ struct esb_packet {
 static sys_slist_t esb_conn_cb_list;
 K_MSGQ_DEFINE(sync_event_msgq, sizeof(struct esb_evt), ESB_PIPE_COUNT * 2, 4);
 
-#define TICK		   (30)
-#define DRIFT_LIMIT	   (50)
-#define DESYNC_COUNT_MAX   (16)
-#define RADIO_MARGIN	   (60)
-#define TIMEOUT_MARGIN	   (90)
-#define HFCLK_WARMUP_DELAY (360)
-#define WINDOW_MARGIN	   (30)
-#define DRIFT_MARGIN	   (30)
-#define ISR_MARGIN	   (30)
+#define TICK			   (30)
+#define DRIFT_LIMIT		   (50)
+#define DESYNC_LIMIT_MS_PERIPHERAL (500)
+#define DESYNC_LIMIT_MS_CENTRAL	   (3000)
+#define RADIO_MARGIN		   (60)
+#define TIMEOUT_MARGIN		   (90)
+#define HFCLK_WARMUP_DELAY	   (360)
+#define WINDOW_MARGIN		   (30)
+#define DRIFT_MARGIN		   (30)
+#define ISR_MARGIN		   (30)
 
 #define RADIO_MARGIN_TICKS	 (RADIO_MARGIN / TICK)
 #define TIMEOUT_MARGIN_TICKS	 (TIMEOUT_MARGIN / TICK)
@@ -341,8 +344,10 @@ K_MSGQ_DEFINE(sync_event_msgq, sizeof(struct esb_evt), ESB_PIPE_COUNT * 2, 4);
 #define DESYNC_AIRTIME_DEFAULT (150000)
 #define SCALE		       (1024)
 #define ALPHA		       (120)
-#define RSSI_BASELINE	       (60)
+#define RSSI_BASELINE	       (65)
 #define RSSI_DIFF_THRESHOLD    (4)
+#define RSSI_DIFF_THRESHOLD_UP (4)
+#define RSSI_DIFF_THRESHOLD_DN (-2)
 #define TX_POWER_MAX	       (4)
 #define TX_POWER_MIN	       (-20)
 #define TX_POWER_BASE	       (-4)
@@ -398,14 +403,11 @@ static uint8_t get_channel(uint32_t seq)
 
 static void set_slotsize()
 {
-	// ctx.slotsize = HEARTBEAT_INTERVAL / CONFIG_ESB_POLLING_RATE;
-
-	// ctx.slotsize = 4096;
-	ctx.slotsize = 17;
+	ctx.slotsize = k_us_to_ticks_ceil32(HEARTBEAT_INTERVAL / CONFIG_ESB_POLLING_RATE);
 
 	ctx.window_size = ctx.slotsize / 2;
 
-	// LOG_WRN("slot %u window %u slots %u", ctx.slotsize, ctx.window_size, ctx.pipes);
+	LOG_WRN("slot %u window %u slots %u", ctx.slotsize, ctx.window_size, ctx.pipes);
 }
 
 static void set_hb_loops(void)
@@ -444,7 +446,11 @@ static void apply_control_packet(void *data)
 	ctx.addr_delay = control->addr_delay;
 	ctx.refslot = control->refslot;
 
-	LOG_WRN("slot %u window %u slots %u", ctx.slotsize, ctx.window_size, ctx.pipes);
+	ctx.timeout_count_max =
+		k_ms_to_ticks_near32(DESYNC_LIMIT_MS_PERIPHERAL) / (ctx.slotsize * ctx.pipes);
+
+	LOG_WRN("slot %u window %u slots %u to max %u", ctx.slotsize, ctx.window_size, ctx.pipes,
+		ctx.timeout_count_max);
 	set_hb_loops();
 }
 
@@ -517,7 +523,7 @@ static bool is_slot_synced(uint8_t pipe)
 
 static bool slot_sync_check(uint8_t pipe, uint32_t ref)
 {
-	uint32_t timeout = (ctx.hb_loops * ctx.slotsize * ctx.pipes * 3);
+	const uint32_t timeout = k_ms_to_ticks_near32(DESYNC_LIMIT_MS_CENTRAL);
 
 	bool in_sync = (WRAP24BIT(ref - slots.last_sync[resolve_pipe(pipe)]) <= timeout);
 	WRITE_BIT(slots.pipe_state, resolve_pipe(pipe), in_sync);
@@ -600,7 +606,15 @@ static int16_t tx_power_get(uint8_t pipe)
 static bool tx_power_update(uint8_t pipe, uint8_t rssi)
 {
 	int rssi_diff = rssi - RSSI_BASELINE;
-	if (abs(rssi_diff) < RSSI_DIFF_THRESHOLD) {
+	// if (abs(rssi_diff) < RSSI_DIFF_THRESHOLD) {
+	// 	settle_count[resolve_pipe(pipe)] = 0;
+
+	// 	return false;
+	// }
+
+	if (rssi_diff <= RSSI_DIFF_THRESHOLD_UP && rssi_diff >= RSSI_DIFF_THRESHOLD_DN) {
+		settle_count[resolve_pipe(pipe)] = 0;
+
 		return false;
 	}
 
@@ -2629,9 +2643,9 @@ static void peripheral_prepare_rx(void)
 		nrfy_timer_task_trigger(esb_timer.p_reg, NRF_TIMER_TASK_START);
 	}
 #ifdef PERIPHERAL_LOG_TS_START
-	LOG_WRN("now %u start %u slot %u ch %u drift %ld hb %d tx %d sd %d", now, rx_start, slot,
+	LOG_WRN("now %u start %u slot %u ch %u drift %ld hb %d tx %d to %u", now, rx_start, slot,
 		esb_addr.rf_channel, ctx.drift_now, ctx.is_hb, tx_power_get(ctx.channel_idx),
-		send_data);
+		ctx.timeout_count);
 #endif
 }
 
@@ -2644,8 +2658,9 @@ static void peripheral_disabled_rx(void)
 
 	bool is_timeout = !nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_CRCOK);
 	if (is_timeout) {
-		// LOG_WRN("timeout");
-		if (++ctx.timeout_count > DESYNC_COUNT_MAX) {
+		if (++ctx.timeout_count > ctx.timeout_count_max) {
+			LOG_WRN("timeout");
+
 			// something's wrong, disable radio and goto desync state
 			hfclk_off();
 			pto_ppi_for_peripheral_prepare_rx_clear(true);
@@ -2688,7 +2703,7 @@ static void peripheral_disabled_rx(void)
 
 	uint8_t tx_len = tx_pdu->pdu.length;
 	if (tx_failed) {
-		if (++pipe_info->tx_try > DESYNC_COUNT_MAX) {
+		if (++pipe_info->tx_try > ctx.timeout_count_max) {
 			set_tx_evt_interrupt(0, false);
 			pto_ppi_for_peripheral_prepare_rx_clear(true);
 			pto_ppi_for_peripheral_start_desync_set(true);
