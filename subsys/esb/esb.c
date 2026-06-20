@@ -320,7 +320,7 @@ K_MSGQ_DEFINE(sync_event_msgq, sizeof(struct esb_evt), ESB_PIPE_COUNT * 2, 4);
 #define RADIO_MARGIN		   (60)
 #define TIMEOUT_MARGIN		   (90)
 #define HFCLK_WARMUP_DELAY	   (360)
-#define WINDOW_MARGIN		   (30)
+#define WINDOW_MARGIN		   (60)
 #define DRIFT_MARGIN		   (30)
 #define ISR_MARGIN		   (30)
 
