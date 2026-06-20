@@ -175,6 +175,33 @@ config ESB_SYS_TIMER_INSTANCE_LEADING_ZERO
 	bool
 	default y if ESB_SYS_TIMER020 || ESB_SYS_TIMER021 || ESB_SYS_TIMER022
 
+choice ESB_SYS_RTC
+	default ESB_SYS_RTC2 if $(dt_nodelabel_has_compat,rtc2,$(DT_COMPAT_NORDIC_NRF_RTC))
+	default ESB_SYS_RTC0
+	prompt "RTC to use for the ESB system RTC"
+
+config ESB_SYS_RTC0
+	bool "RTC0"
+	depends on $(dt_nodelabel_has_compat,rtc0,$(DT_COMPAT_NORDIC_NRF_RTC))
+	select NRFX_RTC0
+
+config ESB_SYS_RTC1
+	bool "RTC1"
+	depends on $(dt_nodelabel_has_compat,rtc1,$(DT_COMPAT_NORDIC_NRF_RTC))
+	select NRFX_RTC1
+
+config ESB_SYS_RTC2
+	bool "RTC2"
+	depends on $(dt_nodelabel_has_compat,rtc2,$(DT_COMPAT_NORDIC_NRF_RTC))
+	select NRFX_RTC2
+	
+endchoice
+config ESB_SYS_RTC_INSTANCE
+	int
+	default 0 if ESB_SYS_RTC0
+	default 1 if ESB_SYS_RTC1
+	default 2 if ESB_SYS_RTC2
+
 endmenu
 
 config ESB_DYNAMIC_INTERRUPTS
