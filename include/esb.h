@@ -661,6 +661,8 @@ int esb_tx_put(uint8_t *data, uint32_t size);
 
 int esb_tx_finish(void);
 
+bool esb_is_initialized(void);
+
 uint8_t esb_get_slot_state(void);
 
 int esb_conn_cb_register(struct esb_conn_cb *cb);

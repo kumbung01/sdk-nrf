@@ -78,6 +78,12 @@ ESB Options
    * - ``CONFIG_ESB_TX_RINGBUF_SIZE``
      - ``256``
      - TX ring buffer size (bytes).
+   * - ``CONFIG_ESB_HFCLK_OFF_EVERY_TX``
+     - ``n``
+     - turn off hfclk after every tx. reduces power consumption.
+   * - ``CONFIG_ESB_FAST_SWITCHING_PERIPHERAL``
+     - ``n``
+     - fast switching between rx/tx. experimental.
 
 Available Polling Rates
 =======================

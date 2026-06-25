@@ -204,6 +204,14 @@ config ESB_SYS_RTC_INSTANCE
 
 endmenu
 
+config ESB_HFCLK_OFF_EVERY_TX
+	bool "turn off hfclk after every tx to reduce power consumption"
+	default n
+
+config ESB_FAST_SWITCHING_PERIPHERAL
+	bool "peripheral fast switching between rx/tx"
+	default n
+
 config ESB_DYNAMIC_INTERRUPTS
 	bool "Use direct dynamic interrupts"
 	select DYNAMIC_INTERRUPTS
