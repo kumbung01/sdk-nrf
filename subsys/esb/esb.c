@@ -2716,7 +2716,7 @@ static void peripheral_prepare_sync(void)
 
 static void peripheral_prepare_rx(void)
 {
-	// uint32_t key = irq_lock();
+	rtc_irq_disable();
 
 	pto_ppi_for_peripheral_prepare_rx_clear(false);
 	// nrfy_rtc_event_clear(esb_rtc.p_reg, NRF_RTC_EVENT_COMPARE_0);
@@ -2725,8 +2725,6 @@ static void peripheral_prepare_rx(void)
 
 	struct pipe_info *pipe_info = rx_pipe_info_get(0);
 	bool send_data = (count_tx(0) > 0) || (pipe_info->tx_try > 0) || ctx.timeout_count > 0;
-
-	rtc_irq_disable();
 
 	if (send_data) {
 		peripheral_prepare_next_rx();
