@@ -2716,6 +2716,7 @@ static void peripheral_prepare_sync(void)
 
 static void peripheral_prepare_rx(void)
 {
+	uint32_t key = irq_lock();
 	rtc_irq_disable();
 
 	pto_ppi_for_peripheral_prepare_rx_clear(false);
@@ -2732,7 +2733,7 @@ static void peripheral_prepare_rx(void)
 		peripheral_prepare_sync();
 	}
 
-	// irq_unlock(key);
+	irq_unlock(key);
 }
 
 static void peripheral_disabled_rx(void)
