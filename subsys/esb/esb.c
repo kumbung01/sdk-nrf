@@ -516,35 +516,51 @@ static void hfclk_off(void)
 
 #if ESB_CENTRAL
 
+enum slot_sync_state {
+	SLOT_DESYNCED,
+	SLOT_SYNC_ACK,
+	SLOT_SYNCED,
+};
+
 static struct peripheral_slot {
-	uint32_t last_sync[ESB_PIPE_COUNT];
-	uint8_t pipe_state;
-} slots;
+	uint32_t last_sync;
+	enum slot_sync_state sync_state;
+} slots[ESB_PIPE_COUNT];
 
 static bool is_slot_synced(uint8_t pipe)
 {
-	return (slots.pipe_state & BIT(resolve_pipe(pipe)));
+	return slots[resolve_pipe(pipe)].sync_state == SLOT_SYNCED;
 }
 
 static bool slot_sync_check(uint8_t pipe, uint32_t ref)
 {
 	const uint32_t timeout = k_ms_to_ticks_near32(DESYNC_LIMIT_MS_CENTRAL);
 
-	bool in_sync = (NRF_RTC_WRAP(ref - slots.last_sync[resolve_pipe(pipe)]) <= timeout);
-	WRITE_BIT(slots.pipe_state, resolve_pipe(pipe), in_sync);
+	struct peripheral_slot *slot = &slots[resolve_pipe(pipe)];
+
+	bool in_sync = NRF_RTC_WRAP(ref - slot->last_sync <= timeout);
+	slot->sync_state = in_sync ? slot->sync_state : SLOT_DESYNCED;
 
 	return in_sync;
 }
 
-static void slot_sync_update(uint8_t pipe, uint32_t ref)
+static void slot_sync_update(uint8_t pipe, uint32_t ref, enum slot_sync_state _state)
 {
-	slots.last_sync[resolve_pipe(pipe)] = ref;
-	WRITE_BIT(slots.pipe_state, resolve_pipe(pipe), true);
+	struct peripheral_slot *slot = &slots[resolve_pipe(pipe)];
+
+	slot->last_sync = ref;
+	slot->sync_state = _state;
 }
 
 uint8_t esb_get_slot_state(void)
 {
-	return slots.pipe_state;
+	uint8_t slot_state = 0;
+
+	for (int pipe = 0; pipe < ESB_PIPE_COUNT; ++pipe) {
+		slot_state |= slots[pipe].sync_state == SLOT_SYNCED;
+	}
+
+	return slot_state;
 }
 #else
 uint8_t esb_get_slot_state(void)
@@ -2280,10 +2296,10 @@ int esb_tdma_start(void)
 
 #if ESB_CENTRAL
 	hfclk_on();
-	pto_ppi_for_central_tx_set(true);
+	pto_ppi_for_central_tx_set();
 	central_prepare_tx();
 #else // ESB_PERIPHERAL
-	pto_ppi_for_peripheral_start_desync_set(true);
+	pto_ppi_for_peripheral_start_desync_set();
 	peripheral_start_desync();
 #endif
 
@@ -2398,7 +2414,7 @@ static void central_prepare_tx(void)
 
 	nrf_radio_packetptr_set(NRF_RADIO, pdu);
 
-	pto_ppi_for_central_tx_set(false);
+	pto_ppi_for_central_tx_enable();
 
 	esb_state = ESB_STATE_CENTRAL_TX;
 
@@ -2429,7 +2445,7 @@ static void central_timeslot_end(void)
 
 	buf_idx = !buf_idx;
 
-	pto_ppi_for_central_tx_clear(false);
+	pto_ppi_for_central_tx_disable();
 	/* Just clear LNA configuration and disable front-end module. */
 	mpsl_fem_lna_configuration_clear();
 	mpsl_fem_disable();
@@ -2456,7 +2472,6 @@ static void central_timeslot_end(void)
 			}
 		}
 
-		// central_prepare_tx();
 		return;
 	}
 
@@ -2473,7 +2488,7 @@ static void central_timeslot_end(void)
 		set_tx_evt_interrupt(pipe, true);
 	}
 
-	slot_sync_update(pipe, start);
+	slot_sync_update(pipe, start, SLOT_SYNCED);
 
 	if (!synced_before) {
 		set_sync_evt_interrupt(pipe, true);
@@ -2508,7 +2523,6 @@ static void central_timeslot_end(void)
 
 static void set_rx_packetptr(void)
 {
-	// update_rf_payload_format(esb_cfg.payload_length);
 	nrf_radio_packetptr_set(NRF_RADIO, rx_payload_buffer);
 }
 
@@ -2562,7 +2576,7 @@ static void peripheral_start_desync(void)
 
 	set_rx_packetptr();
 
-	pto_ppi_for_peripheral_start_desync_set(false);
+	pto_ppi_for_peripheral_start_desync_enable();
 #ifdef PERIPHERAL_LOG_DS_START
 	LOG_WRN("start rx desync CHAN(%u), DESYNC(%u) PIPE(%u) NOW(%u) START(%u)",
 		esb_addr.rf_channel, ctx.desync_count, ctx.pipe,
@@ -2579,7 +2593,7 @@ static void peripheral_disabled_desync(void)
 	hfclk_off();
 	bool ctrl = pdu->pdu.ctrl;
 	if (!nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_CRCOK) || !ctrl) {
-		pto_ppi_for_peripheral_start_desync_clear(false);
+		pto_ppi_for_peripheral_start_desync_disable();
 		peripheral_start_desync();
 		return;
 	}
@@ -2605,8 +2619,8 @@ static void peripheral_disabled_desync(void)
 	LOG_WRN("disabled rx desync: REF(%u) SYNC(%u) HB(%u) SN[%d %d] CTRL %d", ctx.refslot, sync,
 		ctx.last_hb, rx_sn, rx_nesn, ctrl);
 #endif
-	pto_ppi_for_peripheral_start_desync_clear(true);
-	pto_ppi_for_peripheral_prepare_rx_set(true);
+	pto_ppi_for_peripheral_start_desync_clear();
+	pto_ppi_for_peripheral_prepare_rx_set();
 	peripheral_prepare_rx();
 }
 
@@ -2668,7 +2682,7 @@ static void peripheral_prepare_next_rx(void)
 #endif
 	on_radio_disabled = peripheral_disabled_rx;
 
-	pto_ppi_for_peripheral_prepare_rx_set(false);
+	pto_ppi_for_peripheral_prepare_rx_enable();
 
 #ifdef PERIPHERAL_LOG_TS_START
 	static int32_t diff_min = 0xffffff;
@@ -2719,7 +2733,7 @@ static void peripheral_prepare_rx(void)
 	uint32_t key = irq_lock();
 	rtc_irq_disable();
 
-	pto_ppi_for_peripheral_prepare_rx_clear(false);
+	pto_ppi_for_peripheral_prepare_rx_disable();
 	// nrfy_rtc_event_clear(esb_rtc.p_reg, NRF_RTC_EVENT_COMPARE_0);
 	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_CRCOK);
 	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_TXREADY);
@@ -2761,8 +2775,8 @@ static void peripheral_disabled_rx(void)
 		if (++ctx.timeout_count > ctx.timeout_count_max) {
 			// something's wrong, disable hfclk and goto desync state
 			hfclk_off();
-			pto_ppi_for_peripheral_prepare_rx_clear(true);
-			pto_ppi_for_peripheral_start_desync_set(true);
+			pto_ppi_for_peripheral_prepare_rx_clear();
+			pto_ppi_for_peripheral_start_desync_set();
 			peripheral_start_desync();
 		} else {
 			peripheral_prepare_rx();
@@ -2799,8 +2813,8 @@ static void peripheral_disabled_rx(void)
 	if (tx_failed) {
 		if (++pipe_info->tx_try > ctx.timeout_count_max) {
 			set_tx_evt_interrupt(0, false);
-			pto_ppi_for_peripheral_prepare_rx_clear(true);
-			pto_ppi_for_peripheral_start_desync_set(true);
+			pto_ppi_for_peripheral_prepare_rx_clear();
+			pto_ppi_for_peripheral_start_desync_set();
 			peripheral_start_desync();
 			return;
 		}
@@ -2925,6 +2939,10 @@ static void peripheral_disabled_tx_ack(void)
 	peripheral_prepare_rx();
 }
 #endif // !CONFIG_ESB_CENTRAL
+
+void ts_start_central(void)
+{
+}
 
 int esb_set_address_length(uint8_t length)
 {

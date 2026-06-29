@@ -40,12 +40,12 @@ int esb_ppi_init(void);
  */
 void esb_ppi_deinit(void);
 
-void pto_ppi_for_central_tx_set(bool setup);
-void pto_ppi_for_central_tx_clear(bool setup);
-void pto_ppi_for_peripheral_start_desync_set(bool setup);
-void pto_ppi_for_peripheral_start_desync_clear(bool setup);
-void pto_ppi_for_peripheral_prepare_rx_set(bool setup);
-void pto_ppi_for_peripheral_prepare_rx_clear(bool setup);
+void pto_ppi_for_central_tx_set(void);
+void pto_ppi_for_central_tx_clear(void);
+void pto_ppi_for_peripheral_start_desync_set(void);
+void pto_ppi_for_peripheral_start_desync_clear(void);
+void pto_ppi_for_peripheral_prepare_rx_set(void);
+void pto_ppi_for_peripheral_prepare_rx_clear(void);
 
 #ifdef __cplusplus
 }
