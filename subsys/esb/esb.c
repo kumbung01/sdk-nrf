@@ -152,12 +152,11 @@ LOG_MODULE_REGISTER(esb, CONFIG_ESB_LOG_LEVEL);
 /* Internal Enhanced ShockBurst module state. */
 enum esb_state {
 	ESB_STATE_IDLE, /* Idle. */
-	ESB_STATE_CENTRAL_TX,
+	ESB_STATE_TX,
+	ESB_STATE_TX_READY,
 
-	ESB_STATE_PERIPHERAL_DESYNC,
-	ESB_STATE_PERIPHERAL_RX,
-	ESB_STATE_PERIPHERAL_RX_READY,
-	ESB_STATE_PERIPHERAL_TX_ACK,
+	ESB_STATE_RX,
+	ESB_STATE_TX_ACK,
 };
 
 /* Pipe info PID and CRC and acknowledgment payload. */
@@ -283,7 +282,13 @@ static struct esb_tdma_context {
 	uint8_t pipes;	     // number of pipes that are enabled
 
 	bool is_hb; // true if current slot is heartbeat
+	bool tx_is_ctrl;
 	bool force_trigger;
+
+	uint32_t now; // for debug purposes
+	uint32_t window_margin_ticks;
+	uint32_t window_margin_us;
+	uint32_t slot_before;
 } ctx;
 
 struct esb_ctrl_packet {
@@ -295,6 +300,7 @@ struct esb_ctrl_packet {
 
 struct esb_header_dn {
 	uint8_t rssi;
+	int32_t sync;
 	// uint8_t dummy[3];
 } __packed;
 
@@ -331,7 +337,7 @@ K_MSGQ_DEFINE(sync_event_msgq, sizeof(struct esb_evt), ESB_PIPE_COUNT * 2, 4);
 #define RADIO_MARGIN_TICKS   (3)
 #define TIMEOUT_MARGIN_TICKS (4)
 #define HFCLK_WARMUP_TICKS   (12)
-#define WINDOW_MARGIN_TICKS  (1)
+#define WINDOW_MARGIN_TICKS  (3)
 #define DRIFT_MARGIN_TICKS   (1)
 #define ISR_MARGIN_TICKS     (2)
 
@@ -342,15 +348,16 @@ K_MSGQ_DEFINE(sync_event_msgq, sizeof(struct esb_evt), ESB_PIPE_COUNT * 2, 4);
 #define DRIFT_MARGIN_US	  (k_ticks_to_us_near32(DRIFT_MARGIN_TICKS))
 #define ISR_MARGIN_US	  (k_ticks_to_us_near32(ISR_MARGIN_TICKS))
 
-#define HEARTBEAT_INTERVAL    1000000
-#define HEARTBEAT_INTERVAL_MS (HEARTBEAT_INTERVAL / 1000)
+#define HEARTBEAT_INTERVAL_US	 (1000000)
+#define HEARTBEAT_INTERVAL_TICKS (32768)
+#define HEARTBEAT_INTERVAL_MS	 (1000)
 
 // static uint64_t channel_map;
-#define CHANNELS	39
+#define CHANNELS	1
 #define CHANNEL_MASK(x) ((x) - 1)
 #define CENTRAL_PIPE	(7)
 
-#define DESYNC_AIRTIME_DEFAULT (200000)
+#define DESYNC_AIRTIME_DEFAULT (500000)
 #define SCALE		       (1024)
 #define ALPHA		       (120)
 #define RSSI_BASELINE	       (63)
@@ -410,23 +417,37 @@ static uint8_t get_channel(uint32_t seq)
 	return 1 + (ctx.channel_idx * 2);
 }
 
-static void set_slotsize()
+static void _set_slotsize(void)
 {
-	ctx.slotsize = k_us_to_ticks_ceil32(HEARTBEAT_INTERVAL / CONFIG_ESB_POLLING_RATE);
 	ctx.slotsize_us = k_ticks_to_us_near32(ctx.slotsize);
 
 	ctx.window_size = ctx.slotsize / 2;
 	ctx.window_size_us = ctx.slotsize_us / 2;
 
-	// LOG_WRN("slot %u window %u slots %u", ctx.slotsize, ctx.window_size, ctx.pipes);
+	LOG_WRN("slot %u window %u slots %u", ctx.slotsize, ctx.window_size, ctx.pipes);
+	LOG_WRN("slot %u window %u", ctx.slotsize_us, ctx.window_size_us);
+}
+
+static void set_slotsize_us(uint32_t slotsize_us)
+{
+	ctx.slotsize = k_us_to_ticks_ceil32(slotsize_us);
+
+	_set_slotsize();
+}
+
+static void set_slotsize_ticks(uint32_t slotsize_ticks)
+{
+	ctx.slotsize = slotsize_ticks;
+
+	_set_slotsize();
 }
 
 static void set_hb_loops(void)
 {
 	uint32_t loop_size = ctx.slotsize * ctx.pipes;
-	ctx.hb_loops = 32768 / loop_size;
+	ctx.hb_loops = HEARTBEAT_INTERVAL_TICKS / loop_size;
 
-	// LOG_WRN("HEARTBEAT LOOPS(%u) SIZE(%u)", ctx.hb_loops, ctx.hb_loops * loop_size);
+	LOG_WRN("HEARTBEAT LOOPS(%u) SIZE(%u)", ctx.hb_loops, ctx.hb_loops * loop_size);
 }
 
 static void set_control_packet(void *data)
@@ -443,28 +464,31 @@ static void set_control_packet(void *data)
 	control->refslot = ctx.refslot;
 }
 
-static void apply_control_packet(void *data)
+static int apply_control_packet(void *data, uint32_t len)
 {
 	if (data == NULL) {
-		return;
+		return -ENODATA;
+	}
+
+	uint8_t expected = sizeof(struct esb_ctrl_packet) + sizeof(struct esb_header_dn);
+	if (len != expected) {
+		return -EINVAL;
 	}
 
 	struct esb_ctrl_packet *control = (struct esb_ctrl_packet *)data;
 
-	ctx.slotsize = control->slotsize;
-	ctx.slotsize_us = k_ticks_to_us_near32(ctx.slotsize);
-	ctx.window_size = ctx.slotsize / 2;
-	ctx.window_size_us = ctx.slotsize_us / 2;
 	ctx.pipes = control->pipes;
 	ctx.addr_delay = control->addr_delay;
 	ctx.refslot = control->refslot;
+	set_slotsize_ticks(control->slotsize);
 
 	ctx.timeout_count_max =
 		k_ms_to_ticks_near32(DESYNC_LIMIT_MS_PERIPHERAL) / (ctx.slotsize * ctx.pipes);
 
-	// LOG_WRN("slot %u window %u slots %u to max %u", ctx.slotsize, ctx.window_size, ctx.pipes,
-	// 	ctx.timeout_count_max);
+	LOG_WRN("to max %u", ctx.timeout_count_max);
 	set_hb_loops();
+
+	return 0;
 }
 
 int moving_average(int new_val, int before)
@@ -513,23 +537,24 @@ static void hfclk_off(void)
 
 	// LOG_WRN("HF clock released.");
 }
-
-#if ESB_CENTRAL
-
 enum slot_sync_state {
 	SLOT_DESYNCED,
-	SLOT_SYNC_ACK,
+	SLOT_SYNCING,
 	SLOT_SYNCED,
 };
+
+static void set_sync_evt_interrupt(uint8_t pipe, bool enable);
+static void set_tx_evt_interrupt(uint8_t pipe, bool success);
+static void set_rx_evt_interrupt(void);
 
 static struct peripheral_slot {
 	uint32_t last_sync;
 	enum slot_sync_state sync_state;
 } slots[ESB_PIPE_COUNT];
 
-static bool is_slot_synced(uint8_t pipe)
+static enum slot_sync_state get_slot_sync_state(uint8_t pipe)
 {
-	return slots[resolve_pipe(pipe)].sync_state == SLOT_SYNCED;
+	return slots[resolve_pipe(pipe)].sync_state;
 }
 
 static bool slot_sync_check(uint8_t pipe, uint32_t ref)
@@ -539,6 +564,11 @@ static bool slot_sync_check(uint8_t pipe, uint32_t ref)
 	struct peripheral_slot *slot = &slots[resolve_pipe(pipe)];
 
 	bool in_sync = NRF_RTC_WRAP(ref - slot->last_sync <= timeout);
+
+	if (slot->sync_state == SLOT_SYNCED && !in_sync) {
+		set_sync_evt_interrupt(pipe, false);
+	}
+
 	slot->sync_state = in_sync ? slot->sync_state : SLOT_DESYNCED;
 
 	return in_sync;
@@ -547,6 +577,12 @@ static bool slot_sync_check(uint8_t pipe, uint32_t ref)
 static void slot_sync_update(uint8_t pipe, uint32_t ref, enum slot_sync_state _state)
 {
 	struct peripheral_slot *slot = &slots[resolve_pipe(pipe)];
+
+	if (_state == SLOT_SYNCED && slot->sync_state != SLOT_SYNCED) {
+		set_sync_evt_interrupt(pipe, true);
+	} else if (_state == SLOT_DESYNCED && slot->sync_state == SLOT_SYNCED) {
+		set_sync_evt_interrupt(pipe, false);
+	}
 
 	slot->last_sync = ref;
 	slot->sync_state = _state;
@@ -562,12 +598,6 @@ uint8_t esb_get_slot_state(void)
 
 	return slot_state;
 }
-#else
-uint8_t esb_get_slot_state(void)
-{
-	return BIT(ctx.pipe);
-}
-#endif
 
 static uint32_t RSSI[ESB_PIPE_COUNT];
 static bool rssi_initialized[ESB_PIPE_COUNT];
@@ -661,9 +691,9 @@ static inline void drift_reset(void)
 	ctx.drift_now = 0;
 }
 
-static inline void drift_update(int64_t drift)
+static inline void drift_update(int32_t drift)
 {
-	int64_t drift_scaled = drift * SCALE;
+	int32_t drift_scaled = drift * SCALE;
 
 	if (drift_initialized) {
 		drift_initialized = false;
@@ -772,12 +802,9 @@ K_WORK_DELAYABLE_DEFINE(monitoring_work, monitoring_work_cb);
 #endif
 static void central_setup(void)
 {
-	nrf_radio_shorts_set(NRF_RADIO, RADIO_SHORTS_BASIC);
-	nrf_timer_shorts_set(esb_timer.p_reg, NRF_TIMER_SHORT_COMPARE1_CLEAR_MASK |
-						      NRF_TIMER_SHORT_COMPARE1_STOP_MASK);
-	nrf_timer_int_enable(esb_timer.p_reg, NRF_TIMER_INT_COMPARE1_MASK);
 	ctx.pipes = ESB_PIPE_COUNT;
-	set_slotsize();
+	// set_slotsize_us(HEARTBEAT_INTERVAL_US / CONFIG_ESB_POLLING_RATE);
+	set_slotsize_us(1000);
 	set_hb_loops();
 	set_addr_delay();
 	rssi_reset_all();
@@ -809,15 +836,14 @@ K_WORK_DELAYABLE_DEFINE(monitoring_work, monitoring_work_cb);
 
 static void peripheral_setup(void)
 {
-	nrf_radio_shorts_set(NRF_RADIO, RADIO_SHORTS_COMMON);
-	nrf_radio_int_enable(NRF_RADIO, NRF_RADIO_INT_DISABLED_MASK);
-
 	ctx.pipe = esb_cfg.pipe;
 
 	tx_power_reset(ctx.pipe);
 
 	// rx address is fixed, but tx address is changed
 	nrf_radio_rxaddresses_set(NRF_RADIO, BIT(ctx.pipe));
+	ctx.window_margin_ticks = WINDOW_MARGIN_TICKS;
+	ctx.window_margin_us = WINDOW_MARGIN_US;
 }
 #endif
 
@@ -828,6 +854,10 @@ void pto_context_reset(void)
 	ctx.refslot = 0;
 	ctx.desync_count = 0;
 	ctx.channel_idx = 0;
+
+#if ESB_PERIPHERAL
+	drift_reset();
+#endif
 }
 
 /* Run time variables */
@@ -887,14 +917,21 @@ static void (*on_radio_disabled)(void);
 static void (*on_timer_compare1)(void);
 static void (*update_rf_payload_format)(uint32_t payload_length);
 
-static void central_prepare_tx(void);
+static void central_ts_start(void);
+static void central_prepare_tx(uint8_t pipe);
 static void central_timeslot_end(void);
 
-static void peripheral_start_desync(void);
-static void peripheral_disabled_desync(void);
+static void central_prepare_rx(uint8_t pipe);
+static void central_disabled_rx(void);
+static void central_disabled_tx_ack(void);
+
+static void peripheral_ts_start(void);
 static void peripheral_prepare_rx(void);
 static void peripheral_disabled_rx(void);
 static void peripheral_disabled_tx_ack(void);
+static void peripheral_prepare_sync(void);
+static void peripheral_prepare_next_tx(void);
+static void peripheral_timeslot_end(void);
 
 // static inline uint32_t
 
@@ -1711,6 +1748,21 @@ static void sys_rtc_deinit(void)
 	nrfx_rtc_uninit(&esb_rtc);
 }
 
+static void timer_irq_enable(void)
+{
+	nrfy_timer_event_clear(esb_timer.p_reg, NRF_TIMER_EVENT_COMPARE1);
+	nrfy_timer_int_enable(esb_timer.p_reg, NRF_TIMER_INT_COMPARE1_MASK);
+	irq_enable(ESB_TIMER_IRQ);
+}
+
+static void timer_irq_disable(void)
+{
+	irq_disable(ESB_TIMER_IRQ);
+	NVIC_ClearPendingIRQ(ESB_TIMER_IRQ);
+	nrfy_timer_int_disable(esb_timer.p_reg, NRF_TIMER_INT_COMPARE1_MASK);
+	nrfy_timer_event_clear(esb_timer.p_reg, NRF_TIMER_EVENT_COMPARE1);
+}
+
 static void rtc_irq_enable(void)
 {
 	nrfy_rtc_event_clear(esb_rtc.p_reg, NRF_RTC_EVENT_COMPARE_1);
@@ -1730,15 +1782,16 @@ static void radio_irq_enable(void)
 {
 	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_DISABLED);
 	nrf_radio_int_enable(NRF_RADIO, NRF_RADIO_INT_DISABLED_MASK);
+	NVIC_ClearPendingIRQ(ESB_RADIO_IRQ_NUMBER);
 	irq_enable(ESB_RADIO_IRQ_NUMBER);
 }
 
 static void radio_irq_disable(void)
 {
+	irq_disable(ESB_RADIO_IRQ_NUMBER);
+	NVIC_ClearPendingIRQ(ESB_RADIO_IRQ_NUMBER);
 	nrf_radio_int_disable(NRF_RADIO, NRF_RADIO_INT_DISABLED_MASK);
 	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_DISABLED);
-	NVIC_ClearPendingIRQ(ESB_RADIO_IRQ_NUMBER);
-	irq_disable(ESB_RADIO_IRQ_NUMBER);
 }
 
 static void set_evt_interrupt(void)
@@ -1757,7 +1810,7 @@ static void set_tx_evt_interrupt(uint8_t pipe, bool success)
 	interrupt_flags |= (success ? INT_TX_SUCCESS_MSK : INT_TX_FAILED_MSK);
 
 	last_tx_evt.tx_attempts = info->tx_try;
-	info->tx_try = 0;
+	// info->tx_try = 0;
 
 	set_evt_interrupt();
 }
@@ -2206,8 +2259,8 @@ int esb_write_payload(const struct esb_payload *payload)
 	irq_unlock(key);
 
 #if ESB_PERIPHERAL
-	if (esb_state == ESB_STATE_PERIPHERAL_RX_READY) {
-		peripheral_prepare_rx();
+	if (esb_state == ESB_STATE_TX_READY) {
+		peripheral_ts_start();
 	}
 #endif
 
@@ -2237,8 +2290,8 @@ int esb_tx_finish(void)
 	tx_finish();
 
 #if ESB_PERIPHERAL
-	if (esb_state == ESB_STATE_PERIPHERAL_RX_READY) {
-		peripheral_prepare_rx();
+	if (esb_state == ESB_STATE_TX_READY) {
+		peripheral_ts_start();
 	}
 #endif
 
@@ -2278,261 +2331,6 @@ int esb_read_rx_payload(struct esb_payload *payload)
 	return 0;
 }
 
-int esb_tdma_start(void)
-{
-	if (esb_state != ESB_STATE_IDLE) {
-		return -EBUSY;
-	}
-	LOG_WRN("tdma started");
-
-	nrfy_rtc_event_enable(esb_rtc.p_reg, NRF_RTC_INT_COMPARE0_MASK);
-#if ESB_CENTRAL
-	NVIC_ClearPendingIRQ(ESB_TIMER_IRQ);
-	irq_enable(ESB_TIMER_IRQ);
-#else // ESB_PERIPHERAL
-	NVIC_ClearPendingIRQ(ESB_RADIO_IRQ_NUMBER);
-	irq_enable(ESB_RADIO_IRQ_NUMBER);
-#endif
-
-#if ESB_CENTRAL
-	hfclk_on();
-	pto_ppi_for_central_tx_set();
-	central_prepare_tx();
-#else // ESB_PERIPHERAL
-	pto_ppi_for_peripheral_start_desync_set();
-	peripheral_start_desync();
-#endif
-
-	nrfx_rtc_enable(&esb_rtc);
-
-	return 0;
-}
-
-int esb_tdma_stop(bool force)
-{
-#if !CONFIG_ESB_CENTRAL
-	if (esb_state != ESB_STATE_PERIPHERAL_DESYNC && !force) {
-		return -EINVAL;
-	}
-#endif
-
-	on_radio_disabled = NULL;
-
-	LOG_WRN("tdma stopped");
-
-	nrfx_rtc_disable(&esb_rtc);
-	nrfx_rtc_counter_clear(&esb_rtc);
-	nrfx_timer_disable(&esb_timer);
-
-#if ESB_CENTRAL
-	irq_disable(ESB_TIMER_IRQ);
-#else
-	irq_disable(ESB_RADIO_IRQ_NUMBER);
-#endif
-	nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_DISABLE);
-	if (hfclk_is_on) {
-		hfclk_off();
-	}
-
-	esb_state = ESB_STATE_IDLE;
-	pto_context_reset();
-	reset_tx_all();
-	reset_rx_fifo();
-
-	return 0;
-}
-static uint8_t rx_payload_buffer[CONFIG_ESB_MAX_PAYLOAD_LENGTH + sizeof(struct esb_radio_pdu)];
-static uint8_t tx_payload_buffer[CONFIG_ESB_MAX_PAYLOAD_LENGTH + sizeof(struct esb_radio_pdu)];
-
-#if ESB_CENTRAL
-static uint8_t *buffer[2] = {
-	rx_payload_buffer,
-	tx_payload_buffer,
-};
-static uint8_t buf_idx = 0;
-static void central_prepare_tx(void)
-{
-	// LOG_WRN("start_tx_transaction");
-	uint32_t now = nrfx_rtc_counter_get(&esb_rtc);
-	uint32_t slot_diff = NRF_RTC_WRAP(now - ctx.start) / ctx.slotsize + 1;
-	uint32_t tx_start = NRF_RTC_WRAP(ctx.start + (slot_diff * ctx.slotsize));
-
-	if ((int32_t)(tx_start - now) < RADIO_MARGIN_TICKS) {
-		slot_diff++;
-		tx_start = NRF_RTC_WRAP(tx_start + ctx.slotsize);
-	}
-
-	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_CRCOK);
-
-	uint32_t next_slot = ctx.refslot + slot_diff;
-	uint32_t timeout = ctx.slotsize_us - TIMEOUT_MARGIN_US;
-
-	nrfy_rtc_cc_set(esb_rtc.p_reg, 0, tx_start);
-	nrfy_timer_cc_set(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL1, timeout);
-
-	ctx.start = tx_start;
-	ctx.refslot = next_slot;
-	ctx.pipe = (ctx.pipe + slot_diff) % ctx.pipes;
-
-	uint8_t pipe = ctx.pipe;
-	struct pipe_info *pipe_info = rx_pipe_info_get(pipe);
-	struct esb_radio_pdu *pdu = (struct esb_radio_pdu *)buffer[buf_idx];
-	struct esb_packet_dn *tx_packet = (struct esb_packet_dn *)pdu->data;
-
-	bool slot_synced = is_slot_synced(pipe);
-	uint8_t packet_length = sizeof(struct esb_header_dn);
-
-	// if slot is out of sync, then send refslot
-	if (!slot_synced) {
-		packet_length += sizeof(struct esb_ctrl_packet);
-		set_control_packet(tx_packet->data);
-	}
-	// if next packet can be transmitted, then read txbuf
-	else {
-		packet_length += copy_tx(pipe, tx_packet->data);
-		pipe_info->tx_try = packet_length > sizeof(struct esb_header_dn) ? 1 : 0;
-	}
-
-	pdu->pdu.ctrl = !slot_synced;
-	pdu->pdu.length = packet_length;
-	pdu->pdu.sn = pipe_info->sn;
-	pdu->pdu.nesn = pipe_info->nesn;
-
-	esb_addr.rf_channel = get_channel(next_slot);
-#if CONFIG_ESB_WHITEEN
-	nrf_radio_datawhiteiv_set(NRF_RADIO, esb_addr.rf_channel);
-#endif
-	tx_packet->header.rssi = rssi_get(pipe);
-
-	on_timer_compare1 = central_timeslot_end;
-
-	// update_rf_payload_format(packet_length);
-	nrf_radio_txaddress_set(NRF_RADIO, pipe);
-	nrf_radio_frequency_set(NRF_RADIO, (RADIO_BASE_FREQUENCY + esb_addr.rf_channel));
-
-	update_radio_tx_power();
-
-	nrf_radio_packetptr_set(NRF_RADIO, pdu);
-
-	pto_ppi_for_central_tx_enable();
-
-	esb_state = ESB_STATE_CENTRAL_TX;
-
-	// bool rtc_triggered = nrfy_rtc_event_check(esb_rtc.p_reg, NRF_RTC_EVENT_COMPARE_0);
-	// bool egu_triggered = nrf_egu_event_check(ESB_EGU, ESB_EGU_EVENT);
-
-	// if (!egu_triggered && rtc_triggered) {
-	// 	nrf_egu_task_trigger(ESB_EGU, ESB_EGU_TASK);
-	// }
-
-	// LOG_WRN("PIPE %u NOW %u TX %u TO %u SL %u CH %u LEN %u", pipe, now, tx_start, timeout,
-	// 	next_slot, esb_addr.rf_channel, packet_length);
-#ifdef CENTRAL_LOG_TS_START
-	LOG_WRN("PIPE %u SLOT %u CH %u RSSI %d LEN %u SN %d %d SYNC %d CTRL %d WT %u", pipe,
-		ctx.refslot, esb_addr.rf_channel, (int)(tx_packet->header.rssi), packet_length,
-		pipe_info->sn, pipe_info->nesn, slot_synced, pdu->pdu.ctrl,
-		nrf_radio_datawhiteiv_get(NRF_RADIO));
-#endif
-}
-
-static void central_timeslot_end(void)
-{
-	uint8_t pipe = ctx.pipe;
-	uint32_t start = ctx.start;
-	struct esb_radio_pdu *rx_pdu = (struct esb_radio_pdu *)buffer[buf_idx];
-	struct esb_packet *rx_packet = (struct esb_packet *)rx_pdu->data;
-	struct pipe_info *pipe_info = rx_pipe_info_get(pipe);
-
-	buf_idx = !buf_idx;
-
-	pto_ppi_for_central_tx_disable();
-	/* Just clear LNA configuration and disable front-end module. */
-	mpsl_fem_lna_configuration_clear();
-	mpsl_fem_disable();
-
-	// get current timeslot regiter first
-	bool tx_failed = !nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_CRCOK);
-	uint32_t crc = nrf_radio_rxcrc_get(NRF_RADIO);
-	uint8_t rssi = nrf_radio_rssi_sample_get(NRF_RADIO);
-
-	// prepare for next slot
-	central_prepare_tx();
-
-	bool synced_before = is_slot_synced(pipe);
-	if (tx_failed) {
-
-		if (synced_before) {
-			if (pipe_info->tx_try > 0) {
-				pipe_info->tx_try++;
-			}
-
-			if (!slot_sync_check(pipe, start)) {
-				rssi_reset(pipe);
-				set_sync_evt_interrupt(pipe, false);
-			}
-		}
-
-		return;
-	}
-
-	uint8_t rx_sn = rx_pdu->pdu.sn;
-	uint8_t tx_nesn = pipe_info->nesn;
-	uint8_t rx_nesn = rx_pdu->pdu.nesn;
-	uint8_t tx_sn = pipe_info->sn;
-	uint8_t tx_try = pipe_info->tx_try;
-	bool rx_is_ctrl = rx_pdu->pdu.ctrl;
-
-	if (tx_try > 0 && rx_nesn != tx_sn) {
-		pop_tx(pipe);
-		pipe_info->sn = (!pipe_info->sn);
-		set_tx_evt_interrupt(pipe, true);
-	}
-
-	slot_sync_update(pipe, start, SLOT_SYNCED);
-
-	if (!synced_before) {
-		set_sync_evt_interrupt(pipe, true);
-	}
-
-	uint8_t rx_len = rx_pdu->pdu.length;
-	bool retransmit_payload = (pipe_info->crc == crc) && (tx_nesn != rx_sn);
-	bool send_rx_event = !retransmit_payload;
-
-	if (rx_len >= 4) {
-		rssi_update(pipe, rssi);
-	}
-
-	if (send_rx_event) {
-		if (rx_is_ctrl) {
-			pipe_info->crc = crc;
-			pipe_info->nesn = (!pipe_info->nesn);
-		} else if (push_rx_fifo(pipe, rx_sn, rx_len, rx_pdu->data)) {
-			pipe_info->crc = crc;
-			pipe_info->nesn = (!pipe_info->nesn);
-			set_rx_evt_interrupt();
-		}
-	}
-
-#ifdef CENTRAL_LOG_TS_END
-	LOG_WRN("pipe %u rx_len %02u rssi %02d crc %04lx tx[%d %d] rx[%d %d] r %d s %d ctrl %u",
-		pipe, rx_len, (int)(-rssi), crc, tx_sn, rx_nesn, tx_nesn, rx_sn, retransmit_payload,
-		send_rx_event, rx_is_ctrl);
-#endif
-}
-#else // ESB_PERIPHERAL
-
-static void set_rx_packetptr(void)
-{
-	nrf_radio_packetptr_set(NRF_RADIO, rx_payload_buffer);
-}
-
-static void hfclk_on_isr(void)
-{
-	// LOG_WRN("hfclk on isr");
-	hfclk_on();
-}
-
-#if CONFIG_ESB_FAST_SWITCHING_PERIPHERAL
 static void disable_radio(void)
 {
 	nrf_radio_int_disable(NRF_RADIO, NRF_RADIO_INT_DISABLED_MASK);
@@ -2543,89 +2341,416 @@ static void disable_radio(void)
 	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_DISABLED);
 	nrf_radio_int_enable(NRF_RADIO, NRF_RADIO_INT_DISABLED_MASK);
 }
+
+int esb_tdma_start(void)
+{
+	if (esb_state != ESB_STATE_IDLE) {
+		return -EBUSY;
+	}
+	LOG_WRN("tdma started");
+
+	nrfy_rtc_event_enable(esb_rtc.p_reg, NRF_RTC_INT_COMPARE0_MASK);
+	nrf_radio_shorts_set(NRF_RADIO, RADIO_SHORTS_COMMON);
+
+#if ESB_CENTRAL
+	hfclk_on();
+	central_ts_start();
+#else // ESB_PERIPHERAL
+	peripheral_ts_start();
 #endif
 
-static void peripheral_start_desync(void)
-{
-	uint32_t airtime = MIN(ctx.slotsize_us * ctx.pipes * 200, HEARTBEAT_INTERVAL);
-	airtime = (airtime != 0 ? airtime : DESYNC_AIRTIME_DEFAULT);
-	uint32_t heartbeat_ticks = k_us_to_ticks_near32(HEARTBEAT_INTERVAL);
-	uint32_t start = NRF_RTC_WRAP(ctx.start + heartbeat_ticks);
-	uint32_t timeout = airtime;
-	nrfy_rtc_cc_set(esb_rtc.p_reg, 0, start);
-	nrfy_timer_cc_set(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL1, timeout);
-	ctx.start = start;
+	nrfx_rtc_enable(&esb_rtc);
 
-	if ((esb_state != ESB_STATE_PERIPHERAL_DESYNC) && (esb_state != ESB_STATE_IDLE)) {
-		set_sync_evt_interrupt(0, false);
+	return 0;
+}
+
+int esb_tdma_stop(bool force)
+{
+#if ESB_PERIPHERAL
+	if (get_slot_sync_state(0) != SLOT_DESYNCED && !force) {
+		return -EINVAL;
+	}
+#endif
+
+	on_radio_disabled = NULL;
+
+	rtc_irq_disable();
+	radio_irq_disable();
+	timer_irq_disable();
+
+	nrfx_rtc_disable(&esb_rtc);
+	nrfx_rtc_counter_clear(&esb_rtc);
+	nrfx_timer_disable(&esb_timer);
+
+	disable_radio();
+	hfclk_off();
+
+	esb_state = ESB_STATE_IDLE;
+	esb_ppi_disable_all();
+	pto_context_reset();
+	reset_tx_all();
+	reset_rx_fifo();
+
+	LOG_WRN("tdma stopped");
+
+	return 0;
+}
+static uint8_t rx_payload_buffer[CONFIG_ESB_MAX_PAYLOAD_LENGTH + sizeof(struct esb_radio_pdu)];
+static uint8_t tx_payload_buffer[CONFIG_ESB_MAX_PAYLOAD_LENGTH + sizeof(struct esb_radio_pdu)];
+
+const char *state_str[3] = {
+	[SLOT_DESYNCED] = "DESYNCED",
+	[SLOT_SYNCING] = "SYNCING",
+	[SLOT_SYNCED] = "SYNCED",
+};
+
+static void central_prepare_tx(uint8_t pipe)
+{
+	uint32_t timeout = ctx.slotsize_us - TIMEOUT_MARGIN_US;
+	nrfy_timer_cc_set(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL1, timeout);
+
+	struct pipe_info *pipe_info = rx_pipe_info_get(pipe);
+	struct esb_radio_pdu *pdu = (struct esb_radio_pdu *)rx_payload_buffer;
+	struct esb_packet_dn *tx_packet = (struct esb_packet_dn *)pdu->data;
+
+	uint8_t packet_length = sizeof(struct esb_header_dn) + sizeof(struct esb_ctrl_packet);
+	set_control_packet(tx_packet->data);
+
+	pdu->pdu.ctrl = true;
+	pdu->pdu.length = packet_length;
+	pdu->pdu.sn = pipe_info->sn;
+	pdu->pdu.nesn = pipe_info->nesn;
+
+	nrf_radio_txaddress_set(NRF_RADIO, pipe);
+	nrf_radio_rxaddresses_set(NRF_RADIO, BIT(pipe));
+	update_radio_tx_power();
+	nrf_radio_packetptr_set(NRF_RADIO, pdu);
+
+	esb_state = ESB_STATE_TX;
+	on_timer_compare1 = central_timeslot_end;
+
+	timer_irq_enable();
+
+	ppi_for_txrx_set(true);
+
+	// const char *str = state_str[get_slot_sync_state(pipe)];
+	// LOG_WRN("[%s]\tpipe %u state %s\tnow %u start %u diff %u slot %u timeout %u tlen %u",
+	// 	__func__, pipe, str, ctx.now, ctx.start, (ctx.start - ctx.now), ctx.refslot,
+	// 	timeout, packet_length);
+}
+
+const static char *radio_state_str[] = {
+	[NRF_RADIO_STATE_DISABLED] = "NRF_RADIO_STATE_DISABLED",
+	[NRF_RADIO_STATE_RXRU] = "NRF_RADIO_STATE_RXRU",
+	[NRF_RADIO_STATE_RXIDLE] = "NRF_RADIO_STATE_RXIDLE",
+	[NRF_RADIO_STATE_RX] = "NRF_RADIO_STATE_RX",
+	[NRF_RADIO_STATE_RXDISABLE] = "NRF_RADIO_STATE_RXDISABLE",
+	[NRF_RADIO_STATE_TXRU] = "NRF_RADIO_STATE_TXRU",
+	[NRF_RADIO_STATE_TXIDLE] = "NRF_RADIO_STATE_TXIDLE",
+	[NRF_RADIO_STATE_TX] = "NRF_RADIO_STATE_TX",
+	[NRF_RADIO_STATE_TXDISABLE] = "NRF_RADIO_STATE_TXDISABLE",
+};
+
+void central_timeslot_end(void)
+{
+	uint8_t pipe = ctx.pipe;
+	uint32_t start = ctx.start;
+	struct esb_radio_pdu *rx_pdu = (struct esb_radio_pdu *)rx_payload_buffer;
+	struct esb_packet *rx_packet = (struct esb_packet *)rx_pdu->data;
+	struct pipe_info *pipe_info = rx_pipe_info_get(pipe);
+	ppi_for_txrx_clear();
+	timer_irq_disable();
+	/* Just clear LNA configuration and disable front-end module. */
+	mpsl_fem_lna_configuration_clear();
+	mpsl_fem_disable();
+
+	// get current timeslot regiter first
+	bool tx_failed = !nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_CRCOK);
+	uint32_t crc = nrf_radio_rxcrc_get(NRF_RADIO);
+	uint8_t rssi = nrf_radio_rssi_sample_get(NRF_RADIO);
+
+	if (tx_failed) {
+		// LOG_WRN("timeout");
+		// if (nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_TXREADY)) {
+		// 	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_TXREADY);
+		// 	LOG_WRN("txready");
+		// }
+		// if (nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_RXREADY)) {
+		// 	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_RXREADY);
+		// 	LOG_WRN("rxready");
+		// }
+		// if (nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_ADDRESS)) {
+		// 	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_ADDRESS);
+		// 	LOG_WRN("address");
+		// }
+		// LOG_WRN("state=%s", radio_state_str[nrf_radio_state_get(NRF_RADIO)]);
+		// if (nrf_egu_event_check(ESB_EGU, ESB_EGU_EVENT)) {
+		// 	nrf_egu_event_clear(ESB_EGU, ESB_EGU_EVENT);
+		// 	uint32_t now =
+		// 		nrfy_timer_capture_get(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL0);
+		// 	LOG_WRN("egu triggered: now %u", now);
+		// }
+
+		slot_sync_update(pipe, start, SLOT_DESYNCED);
+
+		goto next_slot;
 	}
 
-	on_timer_compare1 = hfclk_on_isr;
-	nrfy_rtc_cc_set(esb_rtc.p_reg, 1,
-			NRF_RTC_WRAP(start - HFCLK_WARMUP_TICKS - ISR_MARGIN_TICKS));
-	rtc_irq_enable();
+	uint8_t rx_sn = rx_pdu->pdu.sn;
+	uint8_t tx_nesn = pipe_info->nesn;
+	uint8_t rx_nesn = rx_pdu->pdu.nesn;
+	uint8_t tx_sn = pipe_info->sn;
+	uint8_t tx_try = pipe_info->tx_try;
 
-	esb_state = ESB_STATE_PERIPHERAL_DESYNC;
-	on_radio_disabled = peripheral_disabled_desync;
+	slot_sync_update(pipe, start,
+			 get_slot_sync_state(pipe) == SLOT_DESYNCED ? SLOT_SYNCING : SLOT_SYNCED);
 
-	esb_addr.rf_channel = get_channel(sys_rand32_get());
+	uint8_t rx_len = rx_pdu->pdu.length;
+	bool retransmit_payload = (pipe_info->crc == crc) && (tx_nesn != rx_sn);
+	bool send_rx_event = !retransmit_payload;
+
+	if (rx_len >= 4) {
+		rssi_update(pipe, rssi);
+	}
+
+	if (send_rx_event) {
+		// in this state, it's always ctrl packet
+		pipe_info->crc = crc;
+		pipe_info->nesn = (!pipe_info->nesn);
+	}
+	LOG_WRN("[central_timeslot_end]");
+
+next_slot:
+
+	// prepare for next slot
+	central_ts_start();
+}
+
+void central_prepare_rx(uint8_t pipe)
+{
+	uint32_t timeout = ctx.window_size_us + WINDOW_MARGIN_US;
+	nrfy_timer_cc_set(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL1, timeout);
+
+	nrf_radio_packetptr_set(NRF_RADIO, rx_payload_buffer);
+	nrf_radio_rxaddresses_set(NRF_RADIO, BIT(pipe));
+	nrf_radio_txaddress_set(NRF_RADIO, CENTRAL_PIPE);
+
+	esb_state = ESB_STATE_RX;
+	on_radio_disabled = central_disabled_rx;
+
+	radio_irq_enable();
+
+	ppi_for_txrx_set(false);
+
+	// const char *str = state_str[get_slot_sync_state(pipe)];
+	// LOG_WRN("[%s]\tpipe %u state %s\tnow %u start %u diff %u slot %u timeout %u", __func__,
+	// 	pipe, str, ctx.now, ctx.start, (ctx.start - ctx.now), ctx.refslot, timeout);
+}
+
+void central_disabled_rx(void)
+{
+	const uint8_t pipe = ctx.pipe;
+	struct esb_radio_pdu *rx_pdu = (struct esb_radio_pdu *)rx_payload_buffer;
+	struct esb_packet_up *rx_packet = (struct esb_packet_up *)rx_pdu->data;
+	struct esb_radio_pdu *tx_pdu = (struct esb_radio_pdu *)tx_payload_buffer;
+	struct esb_packet_dn *tx_packet = (struct esb_packet_dn *)tx_pdu->data;
+	struct pipe_info *pipe_info = rx_pipe_info_get(pipe);
+
+	esb_state = ESB_STATE_TX_ACK;
+	ppi_for_txrx_clear();
+
+	bool synced_before = get_slot_sync_state(pipe) == SLOT_SYNCED;
+
+	// if crcok hasn't been generated, then timeout
+	// or txready has been already generated, then radio has been already latched
+	// so we skip to the next slot
+	bool is_timeout = !nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_CRCOK);
+	bool tx_fired = nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_TXREADY);
+	if (is_timeout || tx_fired) {
+		if (tx_fired) {
+			disable_radio();
+		}
+#if 0
+		bool address_fired = nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_ADDRESS);
+		bool end_fired = nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_END);
+		bool crcerror_fired = nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_CRCERROR);
+
+		const char *to_str = is_timeout ? "TIMEOUT " : "";
+		const char *tx_str = tx_fired ? "TX " : "";
+		const char *addr_str = address_fired ? "ADDR " : "";
+		const char *end_str = end_fired ? "END " : "";
+		const char *crc_str = crcerror_fired ? "CRCERROR" : "";
+
+		LOG_WRN("[%s]\t%s%s%s%s%s", __func__, to_str, tx_str, addr_str, end_str, crc_str);
+#endif
+		if (synced_before) {
+			if (pipe_info->tx_try > 0) {
+				pipe_info->tx_try++;
+			}
+
+			if (!slot_sync_check(pipe, ctx.start)) {
+				rssi_reset(pipe);
+			}
+		}
+
+		radio_irq_disable();
+
+		central_ts_start();
+
+		return;
+	}
+
+	int32_t sync = (int32_t)(nrfy_timer_cc_get(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL2));
+
+	// update TX
+	uint8_t rx_sn = rx_pdu->pdu.sn;
+	uint8_t tx_nesn = pipe_info->nesn;
+	uint8_t rx_nesn = rx_pdu->pdu.nesn;
+	uint8_t tx_sn = pipe_info->sn;
+	uint8_t tx_try = pipe_info->tx_try;
+	uint32_t crc = nrf_radio_rxcrc_get(NRF_RADIO);
+
+	bool tx_failed = (tx_sn == rx_nesn);
+	bool retransmit_payload = (tx_nesn != rx_sn) && (pipe_info->crc != crc);
+
+	int rx_len = rx_pdu->pdu.length;
+	bool send_rx_event = !retransmit_payload && rx_len > 0;
+
+	// we toggle nesn here before pushing rxbuf for ack to central
+	if (send_rx_event && rx_fifo.count < CONFIG_ESB_RX_FIFO_SIZE) {
+		pipe_info->crc = crc;
+		pipe_info->nesn = (!pipe_info->nesn);
+	}
+
+	uint8_t tx_len = tx_pdu->pdu.length;
+	if (!tx_failed) {
+		// if packet before was payload, then tx was successful.
+		if (tx_try > 0 && !tx_pdu->pdu.ctrl) {
+			set_tx_evt_interrupt(pipe, true);
+			uint32_t popped = pop_tx(pipe);
+		}
+
+		tx_len = copy_tx(pipe, tx_packet->data);
+		pipe_info->tx_try = tx_len > 0;
+
+		// set tx pdu length to 4 for rssi settle time for central.
+		tx_pdu->pdu.length = sizeof(struct esb_header_dn) + tx_len;
+		tx_pdu->pdu.ctrl = tx_len == 0;
+	}
+
+	update_radio_tx_power();
+
+	if (!tx_failed) {
+		pipe_info->sn = !pipe_info->sn;
+	}
+
+	uint8_t rssi = nrf_radio_rssi_sample_get(NRF_RADIO);
+	rssi_update(pipe, rssi);
+
+	tx_packet->header.rssi = rssi_get(pipe);
+	tx_packet->header.sync = sync;
+	tx_pdu->pdu.sn = pipe_info->sn;
+	tx_pdu->pdu.nesn = pipe_info->nesn;
+	nrf_radio_packetptr_set(NRF_RADIO, tx_pdu);
+
+	// esb_fem_for_tx_ack();
+	on_radio_disabled = central_disabled_tx_ack;
+
+	// we set txaddress manually here.
+	nrf_radio_txaddress_set(NRF_RADIO, pipe);
+
+	slot_sync_update(pipe, ctx.start, SLOT_SYNCED);
+
+	bool rx_is_ctrl = rx_pdu->pdu.ctrl;
+
+	// push RX
+	if (send_rx_event) {
+		if (rx_is_ctrl == true) {
+			//
+		} else if (push_rx_fifo(pipe, rx_sn, rx_len, rx_pdu->data)) {
+			set_rx_evt_interrupt();
+		}
+	}
+	const char *str = state_str[get_slot_sync_state(pipe)];
+#if 0
+	LOG_WRN("[%s]\tpipe %u state %s\trx_len %u sync %03d p[%u%u] c[%u%u] crc %04x rssi %d",
+		__func__, pipe, str, rx_len, sync, rx_sn, rx_nesn, tx_sn, tx_nesn, crc,
+		(int)(-rssi));
+#endif
+	LOG_WRN("[%s]\tpipe %u state %s\trx_len %u sync %d bef %u start %u diff %d slot %u "
+		"before %u slotdiff %u diff__ %d",
+		__func__, pipe, str, rx_len, sync, ctx.last_hb, ctx.start,
+		(int32_t)(ctx.start - ctx.last_hb), ctx.refslot, ctx.slot_before, ctx.slotdiff,
+		(int32_t)(ctx.refslot - ctx.slot_before));
+}
+
+void central_disabled_tx_ack(void)
+{
+	// LOG_WRN("[%s]\tnow %u", __func__, nrfx_rtc_counter_get(&esb_rtc));
+	radio_irq_disable();
+
+	central_ts_start();
+}
+
+void central_ts_start(void)
+{
+	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_CRCOK);
+	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_TXREADY);
+	// nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_ADDRESS);
+	// nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_END);
+	// nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_CRCERROR);
+
+	// LOG_WRN("start_tx_transaction");
+	uint32_t now = nrfx_rtc_counter_get(&esb_rtc);
+	uint32_t slot_diff = NRF_RTC_WRAP(now - ctx.start) / ctx.slotsize + 1;
+	uint32_t tx_start = NRF_RTC_WRAP(ctx.start + (slot_diff * ctx.slotsize));
+
+	// LOG_WRN("slot_diff %u now %u start %u tx_start %u diff %u", slot_diff, now, ctx.start,
+	// 	tx_start, (int32_t)(tx_start - now));
+	if ((int32_t)(tx_start - now) < (RADIO_MARGIN_TICKS)) {
+		// LOG_ERR("tx_start %u now %u diff %d", tx_start, now, (int32_t)(tx_start - now));
+		slot_diff++;
+		tx_start = NRF_RTC_WRAP(ctx.start + (slot_diff * ctx.slotsize));
+	}
+
+	uint32_t next_slot = ctx.refslot + slot_diff;
+
+	nrfy_rtc_cc_set(esb_rtc.p_reg, 0, tx_start);
+
+	ctx.last_hb = ctx.start;
+	ctx.now = now;
+	ctx.start = tx_start;
+	ctx.slotdiff = slot_diff;
+	ctx.slot_before = ctx.refslot;
+	ctx.refslot = next_slot;
+	ctx.pipe = (ctx.pipe + slot_diff) % ctx.pipes;
+
+	esb_addr.rf_channel = get_channel(next_slot);
 #if CONFIG_ESB_WHITEEN
 	nrf_radio_datawhiteiv_set(NRF_RADIO, esb_addr.rf_channel);
 #endif
 	nrf_radio_frequency_set(NRF_RADIO, (RADIO_BASE_FREQUENCY + esb_addr.rf_channel));
 
-	set_rx_packetptr();
+	uint8_t pipe = ctx.pipe;
+	enum slot_sync_state state = get_slot_sync_state(pipe);
 
-	pto_ppi_for_peripheral_start_desync_enable();
-#ifdef PERIPHERAL_LOG_DS_START
-	LOG_WRN("start rx desync CHAN(%u), DESYNC(%u) PIPE(%u) NOW(%u) START(%u)",
-		esb_addr.rf_channel, ctx.desync_count, ctx.pipe,
-		nrfy_rtc_counter_get(esb_rtc.p_reg), nrfy_rtc_cc_get(esb_rtc.p_reg, 0));
-#endif
-}
-
-static void peripheral_disabled_desync(void)
-{
-	struct esb_radio_pdu *pdu = (struct esb_radio_pdu *)rx_payload_buffer;
-	struct esb_packet_dn *packet = (struct esb_packet_dn *)pdu->data;
-	struct pipe_info *pipe_info = rx_pipe_info_get(0);
-
-	hfclk_off();
-	bool ctrl = pdu->pdu.ctrl;
-	if (!nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_CRCOK) || !ctrl) {
-		pto_ppi_for_peripheral_start_desync_disable();
-		peripheral_start_desync();
-		return;
+	switch (state) {
+	case SLOT_DESYNCED:
+	case SLOT_SYNCING:
+		central_prepare_tx(pipe);
+		break;
+	case SLOT_SYNCED:
+		central_prepare_rx(pipe);
+		break;
+	default:
+		break;
 	}
-
-	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_CRCOK);
-
-	drift_reset();
-
-	bool rx_sn = pdu->pdu.sn;
-	bool rx_nesn = pdu->pdu.nesn;
-	pipe_info->sn = !rx_nesn;
-	pipe_info->nesn = !rx_sn;
-	pipe_info->tx_try = 0;
-	ctx.desync_count = 0;
-
-	apply_control_packet(packet->data);
-
-	uint32_t sync = nrf_timer_cc_get(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL2) - ctx.addr_delay;
-	ctx.last_hb = NRF_RTC_WRAP(ctx.start + k_us_to_ticks_near32(sync));
-
-	set_sync_evt_interrupt(ctx.pipe, true);
-#ifdef PERIPHERAL_LOG_DS_END
-	LOG_WRN("disabled rx desync: REF(%u) SYNC(%u) HB(%u) SN[%d %d] CTRL %d", ctx.refslot, sync,
-		ctx.last_hb, rx_sn, rx_nesn, ctrl);
-#endif
-	pto_ppi_for_peripheral_start_desync_clear();
-	pto_ppi_for_peripheral_prepare_rx_set();
-	peripheral_prepare_rx();
 }
 
-static void peripheral_prepare_next_rx(void)
+static void peripheral_prepare_next_tx(void)
 {
+	uint32_t key = irq_lock();
+
 	uint32_t now = nrfx_rtc_counter_get(&esb_rtc);
 	uint32_t loop_size = ctx.slotsize * ctx.pipes;
 	uint32_t passed = NRF_RTC_WRAP(now - ctx.last_hb);
@@ -2633,33 +2758,41 @@ static void peripheral_prepare_next_rx(void)
 	uint32_t hfclk_margin = hfclk_is_on ? 0 : HFCLK_WARMUP_TICKS;
 	uint32_t loops_diff = hb_loops_passed + 1;
 
-	esb_state = ESB_STATE_PERIPHERAL_RX;
+	esb_state = ESB_STATE_RX;
+	rtc_irq_disable();
 
-	// rtc can have drift only 500ppm
-	int32_t rx_start = ctx.last_tx + loop_size * 3;
-	for (int i = 0; i < k_us_to_ticks_ceil32(500); ++i) {
-		uint32_t diff = loops_diff * loop_size;
+	uint32_t diff = loops_diff * loop_size;
+	int32_t drift_ticks = drift_get_ticks(diff);
+	uint32_t tx_start =
+		NRF_RTC_WRAP(ctx.last_hb + diff + drift_ticks + ctx.window_margin_ticks);
 
-		int32_t drift_ticks = drift_get_ticks(diff);
-		rx_start = (int32_t)(ctx.last_hb + diff + drift_ticks - WINDOW_MARGIN_TICKS);
+	if ((int32_t)(tx_start - now) < (int32_t)(RADIO_MARGIN_TICKS + hfclk_margin)) {
+		loops_diff++;
+		diff = loops_diff * loop_size;
 
-		if ((int32_t)(rx_start - now) < (int32_t)(RADIO_MARGIN_TICKS + hfclk_margin)) {
-			loops_diff++;
-
-			continue;
-		}
-
-		break;
+		drift_ticks = drift_get_ticks(diff);
+		tx_start = NRF_RTC_WRAP(ctx.last_hb + diff + drift_ticks + ctx.window_margin_ticks);
 	}
 
-	ctx.start = NRF_RTC_WRAP((uint32_t)rx_start);
-	ctx.timeout = ctx.window_size_us + WINDOW_MARGIN_US;
+	ctx.start = tx_start;
+	ctx.timeout = ctx.slotsize_us - TIMEOUT_MARGIN_US;
 
-	// we can safely assume that start is at least 2 tick larger than now.
 	nrfy_rtc_cc_set(esb_rtc.p_reg, 0, ctx.start);
 	nrfy_timer_cc_set(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL1, ctx.timeout);
 
 	ctx.is_hb = (loops_diff % ctx.hb_loops) == 0;
+
+	struct pipe_info *info = rx_pipe_info_get(0);
+	struct esb_radio_pdu *pdu = (struct esb_radio_pdu *)rx_payload_buffer;
+
+	uint8_t tx_len = copy_tx(0, pdu->data);
+	ctx.tx_is_ctrl = tx_len == 0;
+	pdu->pdu.ctrl = ctx.tx_is_ctrl;
+	pdu->pdu.length = tx_len > 0 ? tx_len : sizeof(struct esb_header_up);
+	pdu->pdu.sn = info->sn;
+	pdu->pdu.nesn = info->nesn;
+
+	info->tx_try = info->tx_try > 0 ? (info->tx_try + 1) : (tx_len > 0 ? 1 : 0);
 
 	if (!hfclk_is_on) {
 		hfclk_on();
@@ -2673,33 +2806,145 @@ static void peripheral_prepare_next_rx(void)
 #endif
 	nrf_radio_frequency_set(NRF_RADIO, (RADIO_BASE_FREQUENCY + esb_addr.rf_channel));
 
-	// we have to reset txaddress here in case rx disabled irq hasn't been reached
-	// in time.
+	nrf_radio_packetptr_set(NRF_RADIO, pdu);
 	nrf_radio_txaddress_set(NRF_RADIO, ctx.pipe);
+	nrf_radio_rxaddresses_set(NRF_RADIO, BIT(ctx.pipe));
 
-#if CONFIG_ESB_FAST_SWITCHING_PERIPHERAL
-	nrf_radio_shorts_set(NRF_RADIO, RADIO_SHORTS_BASIC | NRF_RADIO_SHORT_DISABLED_TXEN_MASK);
-#endif
-	on_radio_disabled = peripheral_disabled_rx;
+	on_timer_compare1 = peripheral_timeslot_end;
+	timer_irq_enable();
 
-	pto_ppi_for_peripheral_prepare_rx_enable();
+	ppi_for_txrx_set(true);
 
-#ifdef PERIPHERAL_LOG_TS_START
-	static int32_t diff_min = 0xffffff;
-	int32_t diff_final = (int32_t)(ctx.start - now);
-	if (diff_min > diff_final) {
-		diff_min = diff_final;
+	irq_unlock(key);
+
+	const char *str = state_str[get_slot_sync_state(ctx.pipe)];
+	LOG_WRN("[%s]\tpipe %u state %s\thb %u drift %d %d margin %u now %u start %u to %u slot %u "
+		"tlen %u try %u",
+		__func__, ctx.pipe, str, ctx.is_hb, drift_ticks, drift_get_us(diff),
+		ctx.window_margin_us, now, tx_start, ctx.timeout, slot, tx_len, info->tx_try);
+}
+
+static void window_margin_update(int32_t sync_us)
+{
+	if (sync_us <= -45) {
+		return;
 	}
 
-	LOG_WRN("now %u start %u slot %u ch %u drift %ld %ld hb %d tx %d to %u diff %u %d", now,
-		ctx.start, slot, esb_addr.rf_channel, drift_get_ticks(loops_diff * loop_size),
-		drift_get_us(loops_diff * loop_size), ctx.is_hb, tx_power_get(ctx.channel_idx),
-		ctx.timeout_count, diff_final, diff_min);
-#endif
+	int32_t drift_us = sync_us + ctx.window_margin_us;
+
+	ctx.window_margin_ticks = k_us_to_ticks_ceil32(sync_us + WINDOW_MARGIN_US) + 1;
+	ctx.window_margin_us = k_ticks_to_us_near32(ctx.window_margin_ticks);
+}
+
+static void peripheral_timeslot_end(void)
+{
+	const uint8_t pipe = 0;
+	uint32_t start = ctx.start;
+	struct esb_radio_pdu *rx_pdu = (struct esb_radio_pdu *)rx_payload_buffer;
+	struct esb_packet_dn *rx_packet = (struct esb_packet_dn *)rx_pdu->data;
+	struct pipe_info *pipe_info = rx_pipe_info_get(0);
+
+	ppi_for_txrx_clear();
+	/* Just clear LNA configuration and disable front-end module. */
+	// mpsl_fem_lna_configuration_clear();
+	// mpsl_fem_disable();
+	timer_irq_disable();
+
+	// get current timeslot regiter first
+	bool timeout = !nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_CRCOK);
+	uint32_t crc = nrf_radio_rxcrc_get(NRF_RADIO);
+
+	if (timeout) {
+		LOG_WRN("timeout");
+		if (++ctx.timeout_count > ctx.timeout_count_max) {
+			slot_sync_update(pipe, start, SLOT_DESYNCED);
+		}
+
+		peripheral_ts_start();
+
+		return;
+	}
+
+	ctx.timeout_count = 0;
+
+	uint8_t rx_sn = rx_pdu->pdu.sn;
+	uint8_t tx_nesn = pipe_info->nesn;
+	uint8_t rx_nesn = rx_pdu->pdu.nesn;
+	uint8_t tx_sn = pipe_info->sn;
+	uint8_t tx_try = pipe_info->tx_try;
+	bool rx_is_ctrl = rx_pdu->pdu.ctrl;
+
+	uint8_t rssi = rx_packet->header.rssi;
+	int32_t sync_us = -(rx_packet->header.sync - ctx.addr_delay);
+
+	tx_power_update(pipe, rssi);
+	esb_cfg.tx_output_power = tx_power_get(pipe);
+	update_radio_tx_power();
+
+	int32_t drift = sync_us + ctx.window_margin_us;
+
+	if (ctx.is_hb && abs(sync_us) < 200) {
+		int32_t sync_ticks = sync_us >= 0 ? k_us_to_ticks_near32(sync_us)
+						  : (-k_us_to_ticks_near32(-sync_us));
+		ctx.last_hb = NRF_RTC_WRAP(ctx.start + sync_ticks);
+
+		ctx.refslot += ctx.slotdiff;
+		drift_update(drift);
+		// window_margin_update(sync_us);
+	}
+
+	bool tx_failed = (tx_sn == rx_nesn);
+	if (tx_failed) {
+		if (++pipe_info->tx_try > ctx.timeout_count_max) {
+			slot_sync_update(pipe, ctx.start, SLOT_DESYNCED);
+
+			peripheral_ts_start();
+			return;
+		}
+
+		if ((pipe_info->tx_try & 3) == 3) {
+			tx_power_raise(pipe);
+		}
+	} else {
+		pipe_info->tx_try = 0;
+		pipe_info->sn = (!pipe_info->sn);
+	}
+
+	if (!ctx.tx_is_ctrl && !tx_failed) {
+		pop_tx(pipe);
+		set_tx_evt_interrupt(pipe, true);
+	}
+
+	if (hfclk_is_on) {
+		hfclk_off();
+	}
+
+	uint8_t rx_len = rx_pdu->pdu.length;
+	bool retransmit_payload = (tx_nesn != rx_sn);
+	bool send_rx_event = !retransmit_payload;
+
+	if (send_rx_event) {
+		if (rx_is_ctrl) {
+			pipe_info->crc = crc;
+			pipe_info->nesn = (!pipe_info->nesn);
+		} else if (push_rx_fifo(0, rx_sn, rx_len, rx_packet->data)) {
+			pipe_info->crc = crc;
+			pipe_info->nesn = (!pipe_info->nesn);
+			set_rx_evt_interrupt();
+		}
+	}
+
+	LOG_WRN("[%s]\trx_len %u sync %d drift %ld p[%u%u] c[%u%u] crc %04x rssi %d tp %d try %u",
+		__func__, rx_len, sync_us, drift, tx_sn, tx_nesn, rx_sn, rx_nesn, crc, (int)(-rssi),
+		esb_cfg.tx_output_power, pipe_info->tx_try);
+
+	peripheral_ts_start();
 }
 
 static void peripheral_prepare_sync(void)
 {
+	uint32_t key = irq_lock();
+
 	uint32_t now = nrfx_rtc_counter_get(&esb_rtc);
 	uint32_t loop_size = ctx.slotsize * ctx.pipes;
 	uint32_t hb_size = ctx.hb_loops * loop_size;
@@ -2708,32 +2953,36 @@ static void peripheral_prepare_sync(void)
 	uint32_t hfclk_margin = (hfclk_is_on ? 0 : HFCLK_WARMUP_TICKS) + ISR_MARGIN_TICKS;
 	uint32_t loops_diff = (hb_passed + 1) * ctx.hb_loops;
 
-	uint32_t sync_isr_ticks =
-		ctx.last_hb + loops_diff * loop_size - hfclk_margin - RADIO_MARGIN_TICKS;
+	uint32_t sync_isr_ticks = NRF_RTC_WRAP(ctx.last_hb + loops_diff * loop_size - hfclk_margin -
+					       ctx.window_margin_ticks - RADIO_MARGIN_TICKS);
 
 	if ((int32_t)(sync_isr_ticks - now) < loop_size) {
-		peripheral_prepare_next_rx();
+		irq_unlock(key);
+
+		peripheral_prepare_next_tx();
+
 		LOG_ERR("set now.");
 
 		return;
 	}
 
-	on_timer_compare1 = peripheral_prepare_next_rx;
+	on_timer_compare1 = peripheral_prepare_next_tx;
 	nrfy_rtc_cc_set(esb_rtc.p_reg, 1, sync_isr_ticks);
 	rtc_irq_enable();
 
-	esb_state = ESB_STATE_PERIPHERAL_RX_READY;
-#ifdef PERIPHERAL_LOG_SYNC
-	LOG_WRN("now %u isr %u diff %d", now, sync_isr_ticks, (int32_t)(sync_isr_ticks - now));
-#endif
+	irq_unlock(key);
+
+	esb_state = ESB_STATE_TX_READY;
+
+	const char *str = state_str[get_slot_sync_state(ctx.pipe)];
+	LOG_WRN("[%s]\tpipe %u state %s\tnow %u isr %u", __func__, ctx.pipe, str, now,
+		sync_isr_ticks);
 }
 
-static void peripheral_prepare_rx(void)
+static void peripheral_prepare_tx(void)
 {
-	uint32_t key = irq_lock();
 	rtc_irq_disable();
 
-	pto_ppi_for_peripheral_prepare_rx_disable();
 	// nrfy_rtc_event_clear(esb_rtc.p_reg, NRF_RTC_EVENT_COMPARE_0);
 	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_CRCOK);
 	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_TXREADY);
@@ -2742,54 +2991,177 @@ static void peripheral_prepare_rx(void)
 	bool send_data = (count_tx(0) > 0) || (pipe_info->tx_try > 0) || ctx.timeout_count > 0;
 
 	if (send_data) {
-		peripheral_prepare_next_rx();
+		peripheral_prepare_next_tx();
 	} else {
 		peripheral_prepare_sync();
 	}
+}
+
+static void peripheral_ts_start(void)
+{
+	nrfy_timer_task_trigger(esb_timer.p_reg, NRF_TIMER_TASK_SHUTDOWN);
+	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_CRCOK);
+	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_TXREADY);
+	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_RXREADY);
+	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_ADDRESS);
+	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_END);
+	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_CRCERROR);
+
+	enum slot_sync_state state = get_slot_sync_state(0);
+
+	switch (state) {
+	case SLOT_DESYNCED:
+	case SLOT_SYNCING:
+		peripheral_prepare_rx();
+		break;
+	case SLOT_SYNCED:
+		peripheral_prepare_tx();
+		break;
+	default:
+		break;
+	}
+}
+
+static void peripheral_start_rx(void)
+{
+	uint32_t key = irq_lock();
+
+	esb_state = ESB_STATE_RX;
+	rtc_irq_disable();
+
+	enum slot_sync_state state = get_slot_sync_state(0);
+	if (state == SLOT_DESYNCED) {
+		uint32_t rx_start = NRF_RTC_WRAP(ctx.start + HEARTBEAT_INTERVAL_TICKS);
+		ctx.start = rx_start;
+		ctx.timeout = DESYNC_AIRTIME_DEFAULT;
+	} else {
+		uint32_t now = nrfx_rtc_counter_get(&esb_rtc);
+		uint32_t loop_size = ctx.slotsize * ctx.pipes;
+		uint32_t passed = NRF_RTC_WRAP(now - ctx.last_hb);
+		uint32_t hb_loops_passed = passed / loop_size;
+		uint32_t hfclk_margin = hfclk_is_on ? 0 : HFCLK_WARMUP_TICKS;
+		uint32_t loops_diff = hb_loops_passed + 1;
+
+		uint32_t diff = loops_diff * loop_size;
+		uint32_t tx_start = NRF_RTC_WRAP(ctx.last_hb + diff - WINDOW_MARGIN_TICKS);
+
+		if ((int32_t)(tx_start - now) < (int32_t)(RADIO_MARGIN_TICKS + hfclk_margin)) {
+			loops_diff++;
+
+			tx_start = NRF_RTC_WRAP(tx_start + loop_size);
+		}
+
+		ctx.start = tx_start;
+		ctx.timeout = ctx.slotsize_us - TIMEOUT_MARGIN_US;
+	}
+
+	// we can safely assume that start is at least 2 tick larger than now.
+	nrfy_rtc_cc_set(esb_rtc.p_reg, 0, ctx.start);
+	nrfy_timer_cc_set(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL1, ctx.timeout);
+
+	hfclk_on();
+
+	esb_addr.rf_channel = get_channel(sys_rand32_get());
+#if CONFIG_ESB_WHITEEN
+	nrf_radio_datawhiteiv_set(NRF_RADIO, esb_addr.rf_channel);
+#endif
+	nrf_radio_frequency_set(NRF_RADIO, (RADIO_BASE_FREQUENCY + esb_addr.rf_channel));
+
+	// we have to reset txaddress here in case rx disabled irq hasn't been reached
+	// in time.
+	nrf_radio_txaddress_set(NRF_RADIO, ctx.pipe);
+	nrf_radio_packetptr_set(NRF_RADIO, rx_payload_buffer);
+
+	on_radio_disabled = peripheral_disabled_rx;
+
+	radio_irq_enable();
+
+	ppi_for_txrx_set(false);
 
 	irq_unlock(key);
+
+	const char *str = state_str[state];
+	LOG_WRN("[%s]\tpipe %u state %s\tnow: %u, start: %u, timeout: %u", __func__, ctx.pipe, str,
+		nrfy_rtc_counter_get(esb_rtc.p_reg), ctx.start, ctx.timeout);
+}
+
+static void peripheral_prepare_rx(void)
+{
+	enum slot_sync_state state = get_slot_sync_state(ctx.pipe);
+	if (state == SLOT_DESYNCED) {
+
+		uint32_t hfclk_margin = hfclk_is_on ? 0 : HFCLK_WARMUP_TICKS;
+
+		uint32_t key = irq_lock();
+		ctx.now = nrfy_rtc_counter_get(esb_rtc.p_reg);
+
+		uint32_t sync_isr_ticks = NRF_RTC_WRAP(ctx.start + HEARTBEAT_INTERVAL_TICKS -
+						       HFCLK_WARMUP_TICKS - ISR_MARGIN_TICKS);
+
+		on_timer_compare1 = peripheral_start_rx;
+		nrfy_rtc_cc_set(esb_rtc.p_reg, 1, sync_isr_ticks);
+		rtc_irq_enable();
+
+		esb_state = ESB_STATE_RX;
+		irq_unlock(key);
+
+		const char *str = state_str[state];
+		LOG_WRN("[%s]\tpipe %u state %s\tnow: %u, sync_isr_ticks: %u", __func__, ctx.pipe,
+			str, ctx.now, sync_isr_ticks);
+	} else {
+		peripheral_start_rx();
+	}
 }
 
 static void peripheral_disabled_rx(void)
 {
+	const uint8_t pipe = ctx.pipe;
 	struct esb_radio_pdu *rx_pdu = (struct esb_radio_pdu *)rx_payload_buffer;
 	struct esb_packet_dn *rx_packet = (struct esb_packet_dn *)rx_pdu->data;
 	struct esb_radio_pdu *tx_pdu = (struct esb_radio_pdu *)tx_payload_buffer;
 	struct esb_packet_up *tx_packet = (struct esb_packet_up *)tx_pdu->data;
 
-	esb_state = ESB_STATE_PERIPHERAL_TX_ACK;
-#if CONFIG_ESB_FAST_SWITCHING_PERIPHERAL
-	nrf_radio_shorts_set(NRF_RADIO, RADIO_SHORTS_BASIC);
-#endif
+	esb_state = ESB_STATE_TX_ACK;
+	ppi_for_txrx_clear();
 
 	// if crcok hasn't been generated, then timeout
 	// or txready has been already generated, then radio has been already latched
 	// so we skip to the next slot
-	bool is_timeout = !nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_CRCOK) ||
-			  nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_TXREADY);
-	if (is_timeout) {
-#if CONFIG_ESB_FAST_SWITCHING_PERIPHERAL
+	bool is_timeout = !nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_CRCOK);
+	bool tx_fired = nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_TXREADY);
+	if (is_timeout || tx_fired) {
 		disable_radio();
-#endif
-		// LOG_WRN("timeout");
-		if (++ctx.timeout_count > ctx.timeout_count_max) {
-			// something's wrong, disable hfclk and goto desync state
-			hfclk_off();
-			pto_ppi_for_peripheral_prepare_rx_clear();
-			pto_ppi_for_peripheral_start_desync_set();
-			peripheral_start_desync();
-		} else {
-			peripheral_prepare_rx();
+		radio_irq_disable();
+
+		LOG_WRN("%s%s", is_timeout ? "timeout" : " ", tx_fired ? "tx fired" : "");
+
+		if (nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_ADDRESS)) {
+			LOG_WRN("address event fired");
 		}
+
+		if (nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_END)) {
+			LOG_WRN("end event fired");
+		}
+
+		if (nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_CRCERROR)) {
+			LOG_WRN("disabled event fired");
+		}
+
+		hfclk_off();
+		peripheral_ts_start();
 
 		return;
 	}
 
-	ctx.timeout_count = 0;
+	int32_t sync = (int32_t)(nrf_timer_cc_get(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL2) -
+				 ctx.addr_delay);
 
-	struct pipe_info *pipe_info = rx_pipe_info_get(0);
-	int64_t sync = (int64_t)(nrf_timer_cc_get(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL2)) -
-		       (int64_t)(ctx.addr_delay);
+	struct pipe_info *pipe_info = rx_pipe_info_get(pipe);
+
+	// we set pipe info
+	pipe_info->nesn = rx_pdu->pdu.sn;
+	pipe_info->sn = !rx_pdu->pdu.nesn;
+	pipe_info->tx_try = 0;
 
 	// update TX
 	uint8_t rx_sn = rx_pdu->pdu.sn;
@@ -2802,146 +3174,47 @@ static void peripheral_disabled_rx(void)
 	bool retransmit_payload = (tx_nesn != rx_sn);
 
 	int rx_len = rx_pdu->pdu.length;
-	bool send_rx_event = !retransmit_payload && rx_len > sizeof(struct esb_header_dn);
 
 	// we toggle nesn here before pushing rxbuf for ack to central
-	if (send_rx_event && rx_fifo.count < CONFIG_ESB_RX_FIFO_SIZE) {
-		pipe_info->nesn = (!pipe_info->nesn);
-	}
+	pipe_info->nesn = !rx_sn;
+	pipe_info->sn = !pipe_info->sn;
+	tx_pdu->pdu.sn = pipe_info->sn;
+	tx_pdu->pdu.nesn = pipe_info->nesn;
+	nrf_radio_packetptr_set(NRF_RADIO, tx_pdu);
 
-	uint8_t tx_len = tx_pdu->pdu.length;
-	if (tx_failed) {
-		if (++pipe_info->tx_try > ctx.timeout_count_max) {
-			set_tx_evt_interrupt(0, false);
-			pto_ppi_for_peripheral_prepare_rx_clear();
-			pto_ppi_for_peripheral_start_desync_set();
-			peripheral_start_desync();
+	// esb_fem_for_tx_ack();
+	on_radio_disabled = peripheral_disabled_tx_ack;
+
+	// we set txaddress manually here.
+	nrf_radio_txaddress_set(NRF_RADIO, pipe);
+
+	enum slot_sync_state sync_state = get_slot_sync_state(pipe);
+	LOG_WRN("[%s]\tstate %s\trlen %d sync %d", __func__, state_str[sync_state], rx_len, sync);
+
+	if (sync_state == SLOT_DESYNCED) {
+		int err = apply_control_packet(rx_packet->data, rx_len);
+		if (err < 0) {
+			LOG_ERR("invalid control packet(%d)", err);
+
 			return;
 		}
-
-		// tx power raise if tx failed 3 times in a row.
-		if ((pipe_info->tx_try & 3) == 3) {
-			tx_power_raise(0);
-		}
-	} else {
-		// if packet before was payload, then tx was successful.
-		if (tx_try > 0 && !tx_pdu->pdu.ctrl) {
-			set_tx_evt_interrupt(0, true);
-			uint32_t popped = pop_tx(0);
-		}
-
-		tx_len = copy_tx(0, tx_pdu->data);
-		pipe_info->tx_try = tx_len > 0;
-
-		// set tx pdu length to 4 for rssi settle time for central.
-		tx_pdu->pdu.length = tx_len > 0 ? tx_len : sizeof(struct esb_header_up);
-		tx_pdu->pdu.ctrl = tx_len == 0;
-
-		if (tx_len > 0) {
-			ctx.last_tx = ctx.start;
-		}
 	}
 
-	uint8_t rssi = rx_packet->header.rssi;
-	tx_power_update(ctx.pipe, rssi);
-	esb_cfg.tx_output_power = tx_power_get(ctx.pipe);
+	int sync_ticks = sync >= 0 ? k_us_to_ticks_near32(sync) : (-k_us_to_ticks_near32(-sync));
+	ctx.last_hb = NRF_RTC_WRAP(ctx.start + sync_ticks);
 
-	bool tx_triggered = tx_len > 0 || ctx.is_hb || tx_failed;
-	if (tx_triggered) {
-		update_radio_tx_power();
-
-		if (!tx_failed) {
-			pipe_info->sn = !pipe_info->sn;
-		}
-
-		tx_pdu->pdu.sn = pipe_info->sn;
-		tx_pdu->pdu.nesn = pipe_info->nesn;
-		// update_rf_payload_format(tx_pdu->pdu.length);
-		nrf_radio_packetptr_set(NRF_RADIO, tx_pdu);
-
-		esb_fem_for_tx_ack();
-		on_radio_disabled = peripheral_disabled_tx_ack;
-
-		// we set txaddress manually here.
-		nrf_radio_txaddress_set(NRF_RADIO, CENTRAL_PIPE);
-#if !CONFIG_ESB_FAST_SWITCHING_PERIPHERAL
-		nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_TXEN);
-#endif
-	}
-#if CONFIG_ESB_FAST_SWITCHING_PERIPHERAL
-	else {
-		disable_radio();
-	}
-#endif
-
-	// set sync
-	int64_t drift = sync - WINDOW_MARGIN_US;
-	int32_t sync_ticks = 0;
-
-	if (ctx.is_hb && !ctx.force_trigger) {
-		if (abs(drift) <= DRIFT_LIMIT) {
-			drift_update(drift);
-		}
-
-		if (sync >= 0) {
-			sync_ticks = k_us_to_ticks_near32(sync);
-		} else {
-			sync_ticks = -k_us_to_ticks_near32(-sync);
-		}
-
-		ctx.last_hb = NRF_RTC_WRAP(ctx.start + sync_ticks);
-		ctx.refslot += ctx.slotdiff;
-	}
-
-	bool rx_is_ctrl = rx_pdu->pdu.ctrl;
-
-	// push RX
-	if (send_rx_event) {
-		if (rx_is_ctrl == true) {
-			//
-		} else if (push_rx_fifo(0, rx_sn, rx_len - sizeof(struct esb_header_dn),
-					rx_packet->data)) {
-			pipe_info->tx_try++; // check for central next data
-			set_rx_evt_interrupt();
-		}
-	}
-
-#ifdef PERIPHERAL_LOG_TS_END
-	LOG_WRN("len [%u %d] tx[%d %d] rx[%d %d] t %d r %d s %d sy %lld dr %lld rssi %d tp %d TR "
-		"%d ctrl [%u %u]",
-		tx_len, rx_len, tx_sn, rx_nesn, tx_nesn, rx_sn, pipe_info->tx_try,
-		retransmit_payload, send_rx_event, sync, drift, (int)(-rssi),
-		esb_cfg.tx_output_power, tx_triggered, tx_pdu->pdu.ctrl, rx_is_ctrl);
-#endif
-
-	if (!tx_triggered) {
-		peripheral_disabled_tx_ack();
-	}
+	// central tx recieved, change state
+	slot_sync_update(pipe, ctx.start, sync_state == SLOT_DESYNCED ? SLOT_SYNCING : SLOT_SYNCED);
 }
 
 static void peripheral_disabled_tx_ack(void)
 {
-	// LOG_WRN("disabled rx ack");
+	LOG_WRN("[disabled rx ack] last_hb %u", ctx.last_hb);
 
-#if CONFIG_ESB_HFCLK_OFF_EVERY_TX
-	struct pipe_info *info = rx_pipe_info_get(0);
+	hfclk_off();
+	radio_irq_disable();
 
-	bool hfclk_turn_off = info->tx_try == 0;
-#else
-	bool hfclk_turn_off = NRF_RTC_WRAP(ctx.start - ctx.last_tx) > k_ms_to_ticks_near32(500);
-#endif
-
-	if (hfclk_turn_off) {
-		hfclk_off();
-	}
-
-	set_rx_packetptr();
-	peripheral_prepare_rx();
-}
-#endif // !CONFIG_ESB_CENTRAL
-
-void ts_start_central(void)
-{
+	peripheral_ts_start();
 }
 
 int esb_set_address_length(uint8_t length)
