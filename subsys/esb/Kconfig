@@ -212,6 +212,10 @@ config ESB_FAST_SWITCHING_PERIPHERAL
 	bool "peripheral fast switching between rx/tx"
 	default n
 
+config ESB_DISABLE_IRQ_TX
+	bool "disable tx event irq"
+	default n
+
 config ESB_DYNAMIC_INTERRUPTS
 	bool "Use direct dynamic interrupts"
 	select DYNAMIC_INTERRUPTS

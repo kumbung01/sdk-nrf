@@ -13,6 +13,7 @@ inline uint8_t resolve_pipe(uint8_t pipe)
 }
 
 int count_tx(uint8_t pipe);
+int count_tx_net(uint8_t pipe);
 int tx_ok(uint8_t pipe, uint32_t size);
 int put_tx(const struct esb_payload *payload);
 int copy_tx(uint8_t pipe, uint8_t *buffer);

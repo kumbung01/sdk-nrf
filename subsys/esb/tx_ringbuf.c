@@ -12,6 +12,13 @@ int count_tx(uint8_t pipe)
 	return ring_buf_size_get(&txbuf[resolve_pipe(pipe)].data);
 }
 
+int count_tx_net(uint8_t pipe)
+{
+	struct tx_buffer *buf = &txbuf[resolve_pipe(pipe)];
+
+	return ring_buf_size_get(&buf->data) - buf->peeked;
+}
+
 int copy_tx(uint8_t pipe, uint8_t *data)
 {
 	struct tx_buffer *buf = &txbuf[resolve_pipe(pipe)];
