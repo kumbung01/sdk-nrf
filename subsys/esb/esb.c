@@ -40,7 +40,8 @@ LOG_MODULE_REGISTER(esb, CONFIG_ESB_LOG_LEVEL);
 // #define LOG_ALL
 // #define MONITORING_WORK
 // #define PERIPHERAL_LOG_ALL
-// #define CENTRAL_LOG_TS_END
+#define CENTRAL_LOG_TS_END
+#define PERIPHERAL_LOG_TS_END
 
 #ifdef LOG_ALL
 #define CENTRAL_LOG_ALL
@@ -169,7 +170,6 @@ struct pipe_info {
 	bool nesn;
 	uint8_t tx_try;
 	bool synced;
-	struct esb_radio_pdu *pdu;
 	// bool ack_payload; /* State of the transmission of ACK payloads. */
 };
 
@@ -194,12 +194,12 @@ struct esb_radio_fixed_pdu {
 /* Dynamic length radio PDU header definition. */
 struct esb_radio_dynamic_pdu {
 	/* Payload length. */
-#if CONFIG_ESB_MAX_PAYLOAD_LENGTH > 63
+#if ESB_MAX_PAYLOAD_LENGTH > 63
 	uint8_t length;
 #else
 	uint8_t length: 6;
 	uint8_t rfu0: 2;
-#endif /* CONFIG_ESB_MAX_PAYLOAD_LENGTH > 63 */
+#endif /* ESB_MAX_PAYLOAD_LENGTH > 63 */
 
 	/* Disable acknowledge. */
 	uint8_t no_ack: 1;
@@ -213,9 +213,10 @@ struct my_esb_radio_pdu {
 	uint8_t length: 6;
 	uint8_t rfu0: 2;
 	uint8_t ctrl: 1;
+	uint8_t more: 1;
 	uint8_t sn: 1;
 	uint8_t nesn: 1;
-	uint8_t rfu1: 5;
+	uint8_t rfu1: 4;
 } __packed;
 
 /* Radio PDU header definition. */
@@ -283,8 +284,8 @@ static struct esb_tdma_context {
 	uint8_t pipes;	     // number of pipes that are enabled
 
 	bool is_hb; // true if current slot is heartbeat
-	bool force_trigger;
 	bool hb_failed;
+	bool more_data;
 } ctx;
 
 struct esb_ctrl_packet {
@@ -296,9 +297,6 @@ struct esb_ctrl_packet {
 
 struct esb_header_dn {
 	uint8_t rssi;
-	struct __flags {
-		bool is_alive: 1;
-	} flags;
 	// uint8_t dummy[3];
 } __packed;
 
@@ -542,25 +540,6 @@ static struct peripheral_slot {
 	uint32_t last_sync[ESB_PIPE_COUNT];
 	uint8_t pipe_state;
 } slots;
-
-uint8_t slot_broadcast_flag = 0x0;
-
-static bool broadcast_flag_get(uint8_t pipe)
-{
-	return slot_broadcast_flag & BIT(resolve_pipe(pipe));
-}
-
-static void broadcast_flag_clear(uint8_t pipe)
-{
-	WRITE_BIT(slot_broadcast_flag, resolve_pipe(pipe), false);
-}
-
-static void broadcast_flag_set(uint8_t pipe)
-{
-	// set broadcast all flags but who sent.
-
-	slot_broadcast_flag |= (uint8_t)(~BIT(resolve_pipe(pipe)));
-}
 
 static bool is_slot_synced(uint8_t pipe)
 {
@@ -1206,7 +1185,7 @@ static void update_rf_payload_format_esb_dpl(uint32_t payload_length)
 	nrf_radio_packet_conf_t packet_config = {0};
 
 	packet_config.s0len = 0;
-	packet_config.s1len = 3;
+	packet_config.s1len = 4;
 
 	/* Using 6 bits or 8 bits for length */
 	packet_config.lflen = (CONFIG_ESB_MAX_PAYLOAD_LENGTH <= 32) ? 6 : 8;
@@ -1635,7 +1614,7 @@ static bool push_rx_fifo(uint8_t pipe, uint8_t pid, uint8_t rx_len, uint8_t *rx_
 		return false;
 	}
 
-	if (rx_len > CONFIG_ESB_MAX_PAYLOAD_LENGTH) {
+	if (rx_len > ESB_MAX_PAYLOAD_LENGTH) {
 		return false;
 	}
 
@@ -2256,7 +2235,7 @@ int esb_write_payload(const struct esb_payload *payload)
 		return -EINVAL;
 	}
 
-	if ((payload->length == 0) || (payload->length > CONFIG_ESB_MAX_PAYLOAD_LENGTH) ||
+	if ((payload->length == 0) || (payload->length > ESB_MAX_PAYLOAD_LENGTH) ||
 	    ((esb_cfg.protocol == ESB_PROTOCOL_ESB) &&
 	     (payload->length > esb_cfg.payload_length))) {
 		return -EMSGSIZE;
@@ -2287,6 +2266,16 @@ int esb_write_payload(const struct esb_payload *payload)
 
 int esb_tx_start(uint8_t pipe, uint32_t size)
 {
+	if (!esb_initialized) {
+		return -EINVAL;
+	}
+
+#if ESB_CENTRAL
+	if (!is_slot_synced(pipe)) {
+		return -EINVAL;
+	}
+#endif
+
 	if (!tx_ok(pipe, size)) {
 		return -ENOMEM;
 	}
@@ -2459,13 +2448,13 @@ static void central_prepare_tx(void)
 	else {
 		packet_length += copy_tx(pipe, tx_packet->data);
 		pipe_info->tx_try = packet_length > sizeof(struct esb_header_dn) ? 1 : 0;
-		tx_packet->header.flags.is_alive = broadcast_flag_get(pipe);
 	}
 
 	pdu->pdu.ctrl = !slot_synced;
 	pdu->pdu.length = packet_length;
 	pdu->pdu.sn = pipe_info->sn;
 	pdu->pdu.nesn = pipe_info->nesn;
+	pdu->pdu.more = count_tx_net(pipe) > 0;
 
 	esb_addr.rf_channel = get_channel(next_slot);
 #if CONFIG_ESB_WHITEEN
@@ -2548,7 +2537,6 @@ static void central_timeslot_end(void)
 
 	if (rx_nesn != tx_sn) {
 		pipe_info->sn = (!pipe_info->sn);
-		broadcast_flag_clear(pipe);
 		if (tx_try > 0) {
 			pop_tx(pipe);
 			set_tx_evt_interrupt(pipe, true);
@@ -2576,7 +2564,6 @@ static void central_timeslot_end(void)
 		} else if (push_rx_fifo(pipe, rx_sn, rx_len, rx_pdu->data)) {
 			pipe_info->crc = crc;
 			pipe_info->nesn = (!pipe_info->nesn);
-			broadcast_flag_set(pipe);
 			set_rx_evt_interrupt();
 		}
 	}
@@ -2818,7 +2805,8 @@ static void peripheral_prepare_rx(void)
 	// nrfy_rtc_event_clear(esb_rtc.p_reg, NRF_RTC_EVENT_COMPARE_0);
 
 	struct pipe_info *pipe_info = rx_pipe_info_get(0);
-	bool send_data = (count_tx(0) > 0) || (pipe_info->tx_try > 0) || ctx.timeout_count > 0;
+	bool send_data = (count_tx(0) > 0) || (pipe_info->tx_try > 0) || ctx.timeout_count > 0 ||
+			 ctx.more_data;
 
 	if (send_data) {
 		peripheral_prepare_next_rx();
@@ -2907,18 +2895,17 @@ static void peripheral_disabled_rx(void)
 	uint8_t tx_sn = pipe_info->sn;
 	uint8_t tx_try = pipe_info->tx_try;
 	bool rx_is_ctrl = rx_pdu->pdu.ctrl;
-	bool peripheral_is_alive = rx_packet->header.flags.is_alive;
 
 	bool tx_failed = (tx_sn == rx_nesn);
 	bool retransmit_payload = (tx_nesn != rx_sn);
 
-	int rx_len = rx_pdu->pdu.length;
+	int rx_len = rx_pdu->pdu.length - sizeof(struct esb_header_dn);
 	// bool send_rx_event = !retransmit_payload && rx_len > sizeof(struct esb_header_dn);
 	bool send_rx_event = false;
 
 	// we toggle nesn here before pushing rxbuf for ack to central
 	if (!retransmit_payload) {
-		if (rx_len > sizeof(struct esb_header_dn)) {
+		if (rx_len > 0) {
 			if (rx_fifo.count < CONFIG_ESB_RX_FIFO_SIZE) {
 				send_rx_event = true;
 				pipe_info->nesn = (!pipe_info->nesn);
@@ -2968,7 +2955,7 @@ static void peripheral_disabled_rx(void)
 	tx_power_update(ctx.pipe, rssi);
 	esb_cfg.tx_output_power = tx_power_get(ctx.pipe);
 
-	bool tx_triggered = tx_len > 0 || ctx.is_hb || tx_failed || ctx.hb_failed;
+	bool tx_triggered = tx_len > 0 || ctx.is_hb || tx_failed || ctx.hb_failed || rx_len > 0;
 	if (tx_triggered) {
 		update_radio_tx_power();
 
@@ -3004,16 +2991,12 @@ static void peripheral_disabled_rx(void)
 		ctx.hb_failed = false;
 	}
 
-	if (peripheral_is_alive && tx_pdu->pdu.ctrl == true) {
-		set_sync_evt_interrupt(0, true);
-	}
-
+	ctx.more_data = rx_pdu->pdu.more;
 	// push RX
 	if (send_rx_event) {
 		if (rx_is_ctrl == true) {
 			//
-		} else if (push_rx_fifo(0, rx_sn, rx_len - sizeof(struct esb_header_dn),
-					rx_packet->data)) {
+		} else if (push_rx_fifo(ctx.pipe, rx_sn, rx_len, rx_packet->data)) {
 			set_rx_evt_interrupt();
 		}
 	}

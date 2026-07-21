@@ -23,13 +23,13 @@ int copy_tx(uint8_t pipe, uint8_t *data)
 {
 	struct tx_buffer *buf = &txbuf[resolve_pipe(pipe)];
 
-	buf->peeked = ring_buf_peek(&buf->data, data, CONFIG_ESB_MAX_PAYLOAD_LENGTH);
+	buf->peeked = ring_buf_peek(&buf->data, data, ESB_MAX_PAYLOAD_LENGTH);
 	return buf->peeked;
 }
 
 int pop_tx(uint8_t pipe)
 {
-	uint8_t data[CONFIG_ESB_MAX_PAYLOAD_LENGTH];
+	uint8_t data[ESB_MAX_PAYLOAD_LENGTH];
 
 	struct tx_buffer *buf = &txbuf[resolve_pipe(pipe)];
 

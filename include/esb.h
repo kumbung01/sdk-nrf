@@ -651,6 +651,8 @@ int esb_set_bitrate(enum esb_bitrate bitrate);
  */
 int esb_reuse_pid(uint8_t pipe);
 
+#define ESB_MAX_PAYLOAD_LENGTH (CONFIG_ESB_MAX_PAYLOAD_LENGTH - 4)
+
 int esb_tdma_start(void);
 
 int esb_tdma_stop(bool force);
